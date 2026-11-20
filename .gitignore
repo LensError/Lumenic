@@ -1,0 +1,16 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# OS / Editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+*.log
+
+# Local agent instructions
+AGENTS.md

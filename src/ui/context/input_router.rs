@@ -1,0 +1,251 @@
+use super::*;
+
+impl HitNode {
+    fn contains_point(&self, px: f32, py: f32) -> bool {
+        let clip_ok = self.clip.is_none_or(|c| c.contains(px, py));
+        if !clip_ok {
+            return false;
+        }
+        if let Some([cx, cy, sc, rot]) = self.inv_xform {
+            let safe_sc = if sc.is_finite() && sc > 0.001 {
+                sc
+            } else {
+                1.0
+            };
+            let dx = (px - cx) / safe_sc;
+            let dy = (py - cy) / safe_sc;
+            let cs = rot.cos();
+            let sn = rot.sin();
+            let lx = cx + (dx * cs + dy * sn);
+            let ly = cy + (-dx * sn + dy * cs);
+            self.bounds.contains(lx, ly)
+        } else {
+            self.bounds.contains(px, py)
+        }
+    }
+}
+
+impl UiContext {
+    /// Processes a pointer move event in logical points.
+    ///
+    /// Returns `true` only when hover changes, dragging is active, or `cursor_glow` is visible.
+    pub fn on_pointer_move(&mut self, x: f32, y: f32) -> bool {
+        if let Some([px, py]) = self.prev_pointer_pos {
+            self.frame_pointer_delta[0] += x - px;
+            self.frame_pointer_delta[1] += y - py;
+        }
+        self.prev_pointer_pos = Some([x, y]);
+        self.pointer_pos = Some([x, y]);
+
+        let next_hover = self.hit_test(x, y);
+        let hover_changed = next_hover != self.hovered_id;
+        self.hovered_id = next_hover;
+        if next_hover != self.hover_anchor_id {
+            self.hover_anchor_id = next_hover;
+            self.hover_elapsed_s = 0.0;
+        }
+        let needs_redraw =
+            hover_changed || self.pressed_id.is_some() || self.has_active_cursor_glow;
+        if needs_redraw {
+            self.dirty = true;
+        }
+        needs_redraw
+    }
+
+    /// Processes a scroll wheel delta in logical scroll lines/units.
+    pub fn on_scroll(&mut self, dx: f32, dy: f32) {
+        self.frame_scroll_delta[0] += dx;
+        self.frame_scroll_delta[1] += dy;
+        self.dirty = true;
+    }
+
+    /// Processes a pointer button press at the current cursor position.
+    pub fn on_pointer_down(&mut self, button: PointerButton) {
+        self.hover_elapsed_s = 0.0;
+        self.frame_pointer_delta = [0.0, 0.0];
+        let Some([px, py]) = self.pointer_pos else {
+            return;
+        };
+        let hit = self.hit_test_node(px, py);
+        match button {
+            PointerButton::Left => {
+                self.just_pressed_id = hit.as_ref().map(|h| h.id);
+                self.just_pressed_pos = Some([px, py]);
+                self.pressed_id = hit.as_ref().map(|h| h.id);
+                if let Some(node) = hit {
+                    if node.focusable && node.enabled {
+                        self.focused_id = Some(node.id);
+                        self.focus_visible = false;
+                        self.sync_focused_is_text();
+                    }
+                    if node.ripple {
+                        self.ripples.push(RippleEffect {
+                            id: node.id,
+                            center: [px, py],
+                            progress: 0.0,
+                        });
+                    }
+                }
+            }
+            PointerButton::Right => {
+                self.pressed_right_id = hit.as_ref().map(|h| h.id);
+            }
+            PointerButton::Middle => {}
+        }
+        self.dirty = true;
+    }
+
+    /// Processes a pointer button release at the current cursor position.
+    pub fn on_pointer_up(&mut self, button: PointerButton) {
+        match button {
+            PointerButton::Left => {
+                let pressed = self.pressed_id.take();
+                if let (Some(pressed_id), Some([px, py])) = (pressed, self.pointer_pos) {
+                    if self.hit_test(px, py) == Some(pressed_id) {
+                        self.clicked_id = Some(pressed_id);
+                        if self.last_click_id == Some(pressed_id)
+                            && (self.elapsed_time_s - self.last_click_time_s)
+                                <= DOUBLE_CLICK_WINDOW_S
+                        {
+                            self.double_clicked_id = Some(pressed_id);
+                            self.last_click_id = None;
+                        } else {
+                            self.last_click_id = Some(pressed_id);
+                            self.last_click_time_s = self.elapsed_time_s;
+                        }
+                    }
+                }
+                self.dirty = true;
+            }
+            PointerButton::Right => {
+                let pressed = self.pressed_right_id.take();
+                if let (Some(pressed_id), Some([px, py])) = (pressed, self.pointer_pos) {
+                    if self.hit_test(px, py) == Some(pressed_id) {
+                        self.right_clicked_id = Some(pressed_id);
+                    }
+                }
+                self.dirty = true;
+            }
+            PointerButton::Middle => {}
+        }
+    }
+
+    /// Processes a keyboard press for keybind capture, text input, focus traversal, and `Esc`.
+    pub fn on_key_down(&mut self, key: Key, modifiers: Modifiers) {
+        self.last_modifiers = modifiers;
+        if let Some(cap_id) = self.capturing_keybind_id.take() {
+            if key != Key::Escape {
+                self.captured_key = Some((cap_id, key));
+            }
+            self.dirty = true;
+            return;
+        }
+
+        if key == Key::F12 {
+            self.hud_visible = !self.hud_visible;
+            self.dirty = true;
+            return;
+        }
+
+        self.last_key_pressed = Some(key);
+        self.pending_key_events.push((key, modifiers));
+
+        match key {
+            Key::Tab => {
+                self.cycle_focus(modifiers.shift);
+                self.dirty = true;
+            }
+            Key::Enter | Key::Space => {
+                if !self.focused_is_text {
+                    if let Some(fid) = self.focused_id {
+                        self.activated_id = Some(fid);
+                        self.dirty = true;
+                    }
+                } else {
+                    self.dirty = true;
+                }
+            }
+            Key::Escape => {
+                self.dismiss_requested = true;
+                self.dirty = true;
+            }
+            _ => {
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// Processes an IME composition preedit string.
+    pub fn on_ime_preedit(&mut self, text: String) {
+        self.pending_ime_preedit = Some(text);
+        self.dirty = true;
+    }
+
+    /// Processes an IME committed text string.
+    pub fn on_ime_commit(&mut self, text: String) {
+        self.pending_ime_preedit = None;
+        self.pending_ime_commit = Some(text);
+        self.dirty = true;
+    }
+
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn set_viewport_fbo_id(&mut self, fbo_id: Option<u32>) {
+        self.viewport_raw_fbo_id = fbo_id;
+    }
+
+    pub(super) fn sync_focused_is_text(&mut self) {
+        self.focused_is_text = self.focused_id.is_some_and(|fid| {
+            self.semantics
+                .iter()
+                .any(|n| n.id == fid && n.role == Role::TextInput)
+        });
+    }
+
+    fn cycle_focus(&mut self, reverse: bool) {
+        let focusable: Vec<WidgetId> = self
+            .semantics
+            .iter()
+            .filter(|n| n.focusable && n.enabled)
+            .map(|n| n.id)
+            .collect();
+
+        if focusable.is_empty() {
+            self.focused_id = None;
+            self.focused_is_text = false;
+            return;
+        }
+
+        let current_idx = self
+            .focused_id
+            .and_then(|fid| focusable.iter().position(|&id| id == fid));
+
+        let next_idx = match (current_idx, reverse) {
+            (None, false) => 0,
+            (None, true) => focusable.len() - 1,
+            (Some(i), false) => (i + 1) % focusable.len(),
+            (Some(0), true) => focusable.len() - 1,
+            (Some(i), true) => i - 1,
+        };
+        self.focused_id = Some(focusable[next_idx]);
+        self.focus_visible = true;
+        self.sync_focused_is_text();
+    }
+
+    fn hit_test_node(&self, px: f32, py: f32) -> Option<HitNode> {
+        for node in self.hits.iter().rev() {
+            if node.is_overlay && node.enabled && node.contains_point(px, py) {
+                return Some(node.clone());
+            }
+        }
+        for node in self.hits.iter().rev() {
+            if !node.is_overlay && node.enabled && node.contains_point(px, py) {
+                return Some(node.clone());
+            }
+        }
+        None
+    }
+
+    pub(super) fn hit_test(&self, px: f32, py: f32) -> Option<WidgetId> {
+        self.hit_test_node(px, py).map(|n| n.id)
+    }
+}

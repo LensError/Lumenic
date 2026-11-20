@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+      - name: Install Linux UI and headless GL dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libgl1-mesa-dri libgl1 libwayland-dev libxkbcommon-dev
+      - name: Check targets and feature matrix
+        run: |
+          cargo check --all-targets
+          cargo check --no-default-features
+          cargo check --all-features
+          cargo check --target wasm32-unknown-unknown
+      - name: Run clippy with -D warnings
+        run: |
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo clippy --no-default-features --all-targets -- -D warnings
+          cargo clippy --target wasm32-unknown-unknown -- -D warnings
+      - name: Run unit tests
+        run: |
+          cargo test --all-features
+          cargo test --no-default-features
+      - name: Verify Cargo package contents
+        run: cargo package --list --allow-dirty
+      - name: Build wasm32 library artifact
+        run: cargo build --target wasm32-unknown-unknown --release --lib
+
+  build-windows:
+    needs: verify
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        target: [x86_64-pc-windows-msvc, aarch64-pc-windows-msvc]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc,aarch64-pc-windows-msvc
+      - name: Build Windows release library targets
+        shell: pwsh
+        run: |
+          cargo build --lib --release --target ${{ matrix.target }}
+          cargo build --lib --release --no-default-features --target ${{ matrix.target }}
+          cargo build --lib --release --all-features --target ${{ matrix.target }}
+
+  build-linux:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
+      - name: Install Linux native and ARM64 cross-compile toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu libwayland-dev libxkbcommon-dev
+      - name: Build x86_64 and aarch64 release library targets
+        run: |
+          cargo build --lib --release --target x86_64-unknown-linux-gnu
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc cargo build --lib --release --target aarch64-unknown-linux-gnu

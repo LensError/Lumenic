@@ -1,0 +1,81 @@
+[package]
+name = "lumenic"
+version = "0.1.0"
+edition = "2021"
+description = "Lean cross-platform native and WebAssembly application framework"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/LensError/Lumenic"
+homepage = "https://lumenic.lenserror.me"
+documentation = "https://docs.rs/lumenic"
+readme = "README.md"
+keywords = ["gui", "ui", "opengl", "wasm"]
+categories = ["gui", "rendering", "wasm"]
+include = ["src/**/*", "assets/**/*", "Cargo.toml", "README.md", "LICENSE*"]
+
+[lib]
+name = "lumenic"
+path = "src/lib.rs"
+
+[features]
+default = ["network", "dialogs", "clipboard", "tray"]
+network = ["dep:rustls", "dep:webpki-roots"]
+dialogs = ["dep:rfd"]
+clipboard = ["dep:arboard"]
+tray = ["dep:tray-icon"]
+gltf = ["dep:gltf"]
+
+[dependencies]
+winit = "0.30"
+glow = "0.16"
+cosmic-text = { version = "0.12", default-features = false, features = ["std", "swash"] }
+png = { version = "0.17", default-features = false }
+zune-jpeg = { version = "0.4", default-features = false, features = ["std"] }
+image-webp = { version = "0.2", default-features = false }
+gltf = { version = "1.4", default-features = false, features = ["utils", "extras"], optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+glutin = "0.32"
+glutin-winit = "0.5"
+raw-window-handle = "0.6"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"], optional = true }
+webpki-roots = { version = "0.26", optional = true }
+arboard = { version = "3", default-features = false, optional = true }
+rfd = { version = "0.15", default-features = false, optional = true }
+tray-icon = { version = "0.26", default-features = false, features = ["ksni"], optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"], optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = [
+    "Document",
+    "Element",
+    "HtmlElement",
+    "CssStyleDeclaration",
+    "Window",
+    "HtmlCanvasElement",
+    "WebGl2RenderingContext",
+    "WebSocket",
+    "MessageEvent",
+    "BinaryType",
+    "CloseEvent",
+    "ErrorEvent",
+    "Event",
+    "ClipboardEvent",
+    "DataTransfer",
+    "History",
+    "Location",
+    "Performance",
+    "PopStateEvent",
+    "Storage",
+    "XmlHttpRequest",
+] }
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+overflow-checks = true
