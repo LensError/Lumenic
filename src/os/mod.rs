@@ -8,6 +8,8 @@ pub mod ws;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod offscreen;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
 
@@ -16,7 +18,12 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use gl::OffscreenTarget;
+pub(crate) use gl::RenderTargetHandle;
 pub use gl::GlBackend;
+#[cfg(not(target_arch = "wasm32"))]
+pub use offscreen::{OffscreenHost, OffscreenSurface, OffscreenSurfaceConfig, OffscreenSurfaceId};
 use tray::TrayCommand;
 pub use tray::{TrayConfig, TrayEvent, TrayMenuItem};
 
@@ -394,6 +401,34 @@ impl App {
 
     pub(crate) fn take_texture_ops(&mut self) -> Vec<TextureOp> {
         core::mem::take(&mut self.texture_ops)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn with_texture_id_base(base: u64) -> Self {
+        Self {
+            next_texture_id: base,
+            ..Self::default()
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn has_pending_redraw_or_textures(&self) -> bool {
+        self.redraw_requested || !self.texture_ops.is_empty()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn take_all_texture_destroy_ops(&mut self) -> Vec<TextureOp> {
+        let mut ops: Vec<TextureOp> = self
+            .texture_sizes
+            .drain()
+            .map(|(id, _)| TextureOp::Destroy(id))
+            .collect();
+        for op in self.texture_ops.drain(..) {
+            if let TextureOp::Destroy(id) = op {
+                ops.push(TextureOp::Destroy(id));
+            }
+        }
+        ops
     }
 
     /// Creates or updates the native system tray icon, tooltip, and context menu.

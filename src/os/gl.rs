@@ -35,6 +35,38 @@ pub fn compute_kawase_pyramid_sizes(width: u32, height: u32) -> Option<[(u32, u3
     Some([(h_w, h_h), (q_w, q_h), (e_w, e_h)])
 }
 
+/// Opaque internal handle to either the default framebuffer (`None`) or an offscreen FBO.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct RenderTargetHandle(pub(crate) Option<glow::Framebuffer>);
+
+impl RenderTargetHandle {
+    pub(crate) const DEFAULT: Self = Self(None);
+}
+
+/// GPU color framebuffer + RGBA8 texture owned by an offscreen surface.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct OffscreenTarget {
+    pub(crate) fbo: glow::Framebuffer,
+    pub(crate) tex: glow::Texture,
+    pub(crate) w: u32,
+    pub(crate) h: u32,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl OffscreenTarget {
+    pub(crate) fn handle(&self) -> RenderTargetHandle {
+        RenderTargetHandle(Some(self.fbo))
+    }
+
+    pub(crate) fn raw_fbo_id(&self) -> u32 {
+        self.fbo.0.get()
+    }
+
+    pub(crate) fn raw_texture_id(&self) -> u32 {
+        self.tex.0.get()
+    }
+}
+
 struct FboTarget {
     fbo: glow::Framebuffer,
     tex: glow::Texture,
@@ -471,8 +503,15 @@ impl GlBackend {
                 glow::UNSIGNED_BYTE,
                 glow::PixelUnpackData::Slice(None),
             );
+            self.ctx.bind_texture(glow::TEXTURE_2D, None);
 
-            let fbo = self.ctx.create_framebuffer()?;
+            let fbo = match self.ctx.create_framebuffer() {
+                Ok(f) => f,
+                Err(e) => {
+                    self.ctx.delete_texture(tex);
+                    return Err(e);
+                }
+            };
             self.ctx.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
             self.ctx.framebuffer_texture_2d(
                 glow::FRAMEBUFFER,
@@ -1081,8 +1120,20 @@ impl GlBackend {
         }
     }
 
-    /// Sets viewport and clears the color buffer.
+    /// Sets viewport and clears the default color buffer.
+    #[allow(dead_code)]
     pub fn clear(&self, width: u32, height: u32, color: Color) {
+        self.clear_target(None, width, height, color);
+    }
+
+    /// Binds `target_fbo` (`None` = default framebuffer), sets viewport, and clears the color buffer.
+    pub(crate) fn clear_target(
+        &self,
+        target_fbo: Option<glow::Framebuffer>,
+        width: u32,
+        height: u32,
+        color: Color,
+    ) {
         if width == 0 || height == 0 {
             return;
         }
@@ -1092,16 +1143,35 @@ impl GlBackend {
         };
         // SAFETY: `self.ctx` is bound to a valid active GL/WebGL 2 context.
         unsafe {
+            self.ctx.bind_framebuffer(glow::FRAMEBUFFER, target_fbo);
             self.ctx.disable(glow::SCISSOR_TEST);
             self.ctx.viewport(0, 0, w, h);
             self.ctx.clear_color(rgba[0], rgba[1], rgba[2], rgba[3]);
             self.ctx.clear(glow::COLOR_BUFFER_BIT);
+            if target_fbo.is_some() {
+                self.ctx.bind_framebuffer(glow::FRAMEBUFFER, None);
+            }
         }
     }
 
-    /// Draws the instanced SDF batch, running Dual-Kawase backdrop blur when `glass` is active.
-    pub fn render_sdf_batch(
+    /// Draws the instanced SDF batch into an opaque [`RenderTargetHandle`] (used by `gfx::Renderer`).
+    pub(crate) fn render_sdf_batch_handle(
         &mut self,
+        target: RenderTargetHandle,
+        width: u32,
+        height: u32,
+        clear_color: Color,
+        batch: &SdfBatch,
+        instance_bytes: &[u8],
+    ) {
+        self.render_sdf_batch(target.0, width, height, clear_color, batch, instance_bytes);
+    }
+
+    /// Draws the instanced SDF batch into `target_fbo` (`None` = default framebuffer),
+    /// running Dual-Kawase backdrop blur when `glass` is active.
+    pub(crate) fn render_sdf_batch(
+        &mut self,
+        target_fbo: Option<glow::Framebuffer>,
         width: u32,
         height: u32,
         clear_color: Color,
@@ -1111,8 +1181,11 @@ impl GlBackend {
         if width == 0 || height == 0 {
             return;
         }
+        let (Ok(wi), Ok(hi)) = (i32::try_from(width), i32::try_from(height)) else {
+            return;
+        };
         if self.ensure_pipeline().is_err() {
-            self.clear(width, height, clear_color);
+            self.clear_target(target_fbo, width, height, clear_color);
             return;
         }
         if batch.has_glass {
@@ -1122,7 +1195,7 @@ impl GlBackend {
         if (instance_bytes.is_empty() && batch.viewport_3d.is_empty() && batch.custom_2d.is_empty())
             || batch.runs.is_empty()
         {
-            self.clear(width, height, clear_color);
+            self.clear_target(target_fbo, width, height, clear_color);
             return;
         }
         self.last_sdf_bytes = instance_bytes.len();
@@ -1158,10 +1231,6 @@ impl GlBackend {
             }
         } else {
             None
-        };
-
-        let (Ok(wi), Ok(hi)) = (i32::try_from(width), i32::try_from(height)) else {
-            return;
         };
 
         let (
@@ -1331,8 +1400,8 @@ impl GlBackend {
                     prev_tex = dst_tex;
                 }
 
-                // Pass 3: Blit `scene` to default framebuffer, then draw glass + remaining runs.
-                self.ctx.bind_framebuffer(glow::FRAMEBUFFER, None);
+                // Pass 3: Blit `scene` to `target_fbo`, then draw glass + remaining runs.
+                self.ctx.bind_framebuffer(glow::FRAMEBUFFER, target_fbo);
                 self.ctx.disable(glow::BLEND);
                 self.ctx.viewport(0, 0, wi, hi);
                 self.ctx.use_program(Some(blit_program));
@@ -1348,18 +1417,25 @@ impl GlBackend {
                     batch,
                     split_idx..batch.runs.len(),
                     blurred_tex,
-                    None,
+                    target_fbo,
                 );
             }
         } else {
-            // SAFETY: default framebuffer is active and pipeline handles belong to `self.ctx`.
+            // SAFETY: `target_fbo` (or default framebuffer) is active and pipeline handles belong to `self.ctx`.
             unsafe {
-                self.ctx.bind_framebuffer(glow::FRAMEBUFFER, None);
+                self.ctx.bind_framebuffer(glow::FRAMEBUFFER, target_fbo);
                 self.ctx.disable(glow::SCISSOR_TEST);
                 self.ctx.viewport(0, 0, wi, hi);
                 self.ctx.clear_color(rgba[0], rgba[1], rgba[2], rgba[3]);
                 self.ctx.clear(glow::COLOR_BUFFER_BIT);
-                self.draw_runs(wi, hi, batch, 0..batch.runs.len(), None, None);
+                self.draw_runs(wi, hi, batch, 0..batch.runs.len(), None, target_fbo);
+            }
+        }
+
+        if target_fbo.is_some() {
+            // SAFETY: unbinding to default framebuffer leaves GL state clean for external callers.
+            unsafe {
+                self.ctx.bind_framebuffer(glow::FRAMEBUFFER, None);
             }
         }
 
@@ -1379,8 +1455,12 @@ impl GlBackend {
             return;
         };
         self.ctx.enable(glow::BLEND);
-        self.ctx
-            .blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+        self.ctx.blend_func_separate(
+            glow::SRC_ALPHA,
+            glow::ONE_MINUS_SRC_ALPHA,
+            glow::ONE,
+            glow::ONE_MINUS_SRC_ALPHA,
+        );
         self.ctx.use_program(Some(p.sdf_program));
         self.ctx.bind_vertex_array(Some(p.dummy_vao));
         self.ctx
@@ -1646,8 +1726,12 @@ impl GlBackend {
                     break;
                 }
                 self.ctx.enable(glow::BLEND);
-                self.ctx
-                    .blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+                self.ctx.blend_func_separate(
+                    glow::SRC_ALPHA,
+                    glow::ONE_MINUS_SRC_ALPHA,
+                    glow::ONE,
+                    glow::ONE_MINUS_SRC_ALPHA,
+                );
             }
             for draw in &vp.scene.draws {
                 if draw.custom_shader.is_some() {
@@ -1741,8 +1825,12 @@ impl GlBackend {
 
         if has_custom_shader {
             self.ctx.enable(glow::BLEND);
-            self.ctx
-                .blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+            self.ctx.blend_func_separate(
+                glow::SRC_ALPHA,
+                glow::ONE_MINUS_SRC_ALPHA,
+                glow::ONE,
+                glow::ONE_MINUS_SRC_ALPHA,
+            );
             self.ctx.depth_mask(true);
             for draw in &vp.scene.draws {
                 let Some(ref cs) = draw.custom_shader else {
@@ -1852,8 +1940,14 @@ impl GlBackend {
             self.ctx.disable(glow::SCISSOR_TEST);
         }
         self.ctx.enable(glow::BLEND);
-        self.ctx
-            .blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+        // `t3d_tex` is cleared to (0,0,0,0) and blended/MSAA-resolved into premultiplied RGBA;
+        // composite with ONE / ONE_MINUS_SRC_ALPHA to avoid double-premultiplying silhouette edges.
+        self.ctx.blend_func_separate(
+            glow::ONE,
+            glow::ONE_MINUS_SRC_ALPHA,
+            glow::ONE,
+            glow::ONE_MINUS_SRC_ALPHA,
+        );
         self.ctx.use_program(Some(blit_program));
         self.ctx.bind_vertex_array(Some(dummy_vao));
         self.ctx.active_texture(glow::TEXTURE0);
@@ -1933,8 +2027,12 @@ impl GlBackend {
             self.ctx.disable(glow::SCISSOR_TEST);
         }
         self.ctx.enable(glow::BLEND);
-        self.ctx
-            .blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+        self.ctx.blend_func_separate(
+            glow::SRC_ALPHA,
+            glow::ONE_MINUS_SRC_ALPHA,
+            glow::ONE,
+            glow::ONE_MINUS_SRC_ALPHA,
+        );
         self.ctx.use_program(Some(entry.program));
 
         let bind_common_uniforms = |uniforms: &[f32]| {
@@ -2187,6 +2285,227 @@ impl GlBackend {
                 .copy_from_slice(&bottom_up[src_off..src_off + row_bytes]);
         }
         Ok(top_down)
+    }
+
+    /// Creates a dedicated RGBA8 color FBO + texture target for offscreen rendering.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn create_offscreen_target(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> Result<OffscreenTarget, Error> {
+        if width == 0 || height == 0 {
+            return Err(Error::InvalidInput(String::from(
+                "offscreen target dimensions must be non-zero",
+            )));
+        }
+        // SAFETY: `self.ctx` is current on this thread.
+        let max_tex = unsafe { self.ctx.get_parameter_i32(glow::MAX_TEXTURE_SIZE) };
+        if max_tex > 0 && (width > max_tex as u32 || height > max_tex as u32) {
+            return Err(Error::InvalidInput(format!(
+                "offscreen target {width}x{height} exceeds GL_MAX_TEXTURE_SIZE ({max_tex})"
+            )));
+        }
+        let target = self
+            .create_fbo_target(width, height)
+            .map_err(|e| Error::Graphics(format!("offscreen FBO allocation failed: {e}")))?;
+        // SAFETY: `self.ctx` is current and `target.fbo` was just created by `self.ctx`.
+        let status = unsafe {
+            self.ctx
+                .bind_framebuffer(glow::FRAMEBUFFER, Some(target.fbo));
+            let s = self.ctx.check_framebuffer_status(glow::FRAMEBUFFER);
+            self.ctx.bind_framebuffer(glow::FRAMEBUFFER, None);
+            s
+        };
+        if status != glow::FRAMEBUFFER_COMPLETE {
+            self.destroy_fbo_target(target);
+            return Err(Error::Graphics(format!(
+                "offscreen FBO incomplete (status 0x{status:x})"
+            )));
+        }
+        Ok(OffscreenTarget {
+            fbo: target.fbo,
+            tex: target.tex,
+            w: target.w,
+            h: target.h,
+        })
+    }
+
+    /// Deletes an offscreen FBO + texture target while the owning GL context is current.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn destroy_offscreen_target(&self, target: OffscreenTarget) {
+        self.destroy_fbo_target(FboTarget {
+            fbo: target.fbo,
+            tex: target.tex,
+            w: target.w,
+            h: target.h,
+        });
+    }
+
+    /// Reads an offscreen FBO directly into caller-owned `dst` with zero heap allocations.
+    ///
+    /// When `bottom_up` is `true`, pixels stay in native OpenGL bottom-up row order (row 0 = bottom).
+    /// When `bottom_up` is `false`, rows are flipped in-place into top-down order.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn read_target_pixels_rgba_into(
+        &self,
+        target: &OffscreenTarget,
+        dst: &mut [u8],
+        bottom_up: bool,
+    ) -> Result<(), Error> {
+        let width = target.w;
+        let height = target.h;
+        if width == 0 || height == 0 {
+            return Err(Error::InvalidInput(String::from(
+                "read_pixels dimensions must be non-zero",
+            )));
+        }
+        let wi = i32::try_from(width)
+            .map_err(|_| Error::InvalidInput(String::from("width exceeds i32")))?;
+        let hi = i32::try_from(height)
+            .map_err(|_| Error::InvalidInput(String::from("height exceeds i32")))?;
+        let row_bytes = usize::try_from(width)
+            .ok()
+            .and_then(|w| w.checked_mul(4))
+            .ok_or_else(|| Error::InvalidInput(String::from("row stride overflow")))?;
+        let total_bytes = usize::try_from(height)
+            .ok()
+            .and_then(|h| row_bytes.checked_mul(h))
+            .ok_or_else(|| Error::InvalidInput(String::from("framebuffer size overflow")))?;
+        if dst.len() < total_bytes {
+            return Err(Error::InvalidInput(format!(
+                "destination buffer too small: need {total_bytes} bytes for {width}x{height} RGBA8, got {}",
+                dst.len()
+            )));
+        }
+
+        let buf = &mut dst[..total_bytes];
+        // SAFETY: `self.ctx` is current, `target.fbo` belongs to `self.ctx`, `PIXEL_PACK_BUFFER`
+        // and all pack store strides/offsets are reset before `read_pixels`, and `buf` has exact
+        // `width * height * 4` writable bytes.
+        unsafe {
+            self.ctx
+                .bind_framebuffer(glow::FRAMEBUFFER, Some(target.fbo));
+            self.ctx.read_buffer(glow::COLOR_ATTACHMENT0);
+            self.ctx.bind_buffer(glow::PIXEL_PACK_BUFFER, None);
+            self.ctx.pixel_store_i32(glow::PACK_ALIGNMENT, 1);
+            self.ctx.pixel_store_i32(glow::PACK_ROW_LENGTH, 0);
+            self.ctx.pixel_store_i32(glow::PACK_SKIP_ROWS, 0);
+            self.ctx.pixel_store_i32(glow::PACK_SKIP_PIXELS, 0);
+            self.ctx.read_pixels(
+                0,
+                0,
+                wi,
+                hi,
+                glow::RGBA,
+                glow::UNSIGNED_BYTE,
+                glow::PixelPackData::Slice(Some(buf)),
+            );
+            self.ctx.bind_framebuffer(glow::FRAMEBUFFER, None);
+        }
+
+        if !bottom_up {
+            let h = height as usize;
+            for row in 0..(h / 2) {
+                let top_off = row * row_bytes;
+                let bot_off = (h - 1 - row) * row_bytes;
+                let (head, tail) = buf.split_at_mut(bot_off);
+                head[top_off..top_off + row_bytes].swap_with_slice(&mut tail[..row_bytes]);
+            }
+        }
+        Ok(())
+    }
+
+    /// Flushes queued OpenGL commands on the active context.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn flush(&self) {
+        // SAFETY: active GL context is current on this thread.
+        unsafe {
+            self.ctx.flush();
+        }
+    }
+
+    /// Blocks until all queued OpenGL commands on the active context complete.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn finish(&self) {
+        // SAFETY: active GL context is current on this thread.
+        unsafe {
+            self.ctx.finish();
+        }
+    }
+
+    /// Deterministically deletes all GL programs, buffers, VAOs, textures, FBOs, and queries.
+    ///
+    /// Must be called while the owning GL context is still current (before destroying the context).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn destroy_gl_resources(&mut self) {
+        // SAFETY: unbinding active GL slots before deleting owned objects is valid while context is current.
+        unsafe {
+            self.ctx.bind_framebuffer(glow::FRAMEBUFFER, None);
+            self.ctx.bind_vertex_array(None);
+            self.ctx.bind_buffer(glow::ARRAY_BUFFER, None);
+            self.ctx.bind_texture(glow::TEXTURE_2D, None);
+            self.ctx.use_program(None);
+        }
+        if let Some(p) = self.pipeline.take() {
+            if let Some(scene) = p.scene_target {
+                self.destroy_fbo_target(scene);
+            }
+            for t in p.down_targets {
+                self.destroy_fbo_target(t);
+            }
+            for t in p.up_targets {
+                self.destroy_fbo_target(t);
+            }
+            // SAFETY: all handles in `p` were created by `self.ctx` and the context is current.
+            unsafe {
+                self.ctx.delete_vertex_array(p.dummy_vao);
+                self.ctx.delete_buffer(p.instance_vbo);
+                self.ctx.delete_texture(p.atlas_tex);
+                self.ctx.delete_program(p.sdf_program);
+                self.ctx.delete_program(p.kawase_down_program);
+                self.ctx.delete_program(p.kawase_up_program);
+                self.ctx.delete_program(p.blit_program);
+                self.ctx.delete_program(p.mesh3d_program);
+                self.ctx.delete_vertex_array(p.quad_vao);
+                self.ctx.delete_buffer(p.quad_vbo);
+                self.ctx.delete_vertex_array(p.custom_vao);
+                self.ctx.delete_buffer(p.custom_vbo);
+                self.ctx.delete_buffer(p.custom_inst_vbo);
+                if let Some(q) = p.timer_query {
+                    self.ctx.delete_query(q);
+                }
+            }
+        }
+        if let Some(vp3d) = self.viewport3d_target.take() {
+            self.destroy_3d_target(vp3d);
+        }
+        for (_, (tex, _, _)) in self.user_textures.drain() {
+            // SAFETY: texture belongs to `self.ctx` and the context is current.
+            unsafe {
+                self.ctx.delete_texture(tex);
+            }
+        }
+        for (_, entry) in self.custom_programs.drain() {
+            // SAFETY: program belongs to `self.ctx` and the context is current.
+            unsafe {
+                self.ctx.delete_program(entry.program);
+            }
+        }
+        for (_, entry) in self.custom_3d_programs.drain() {
+            // SAFETY: program belongs to `self.ctx` and the context is current.
+            unsafe {
+                self.ctx.delete_program(entry.program);
+            }
+        }
+        for (_, cached) in self.mesh3d_cache.drain() {
+            // SAFETY: handles belong to `self.ctx` and the context is current.
+            unsafe {
+                self.ctx.delete_vertex_array(cached.vao);
+                self.ctx.delete_buffer(cached.vbo);
+                self.ctx.delete_buffer(cached.ebo);
+            }
+        }
     }
 }
 

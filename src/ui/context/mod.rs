@@ -551,6 +551,7 @@ pub struct UiContext {
     pub(crate) viewport_scenes: HashMap<WidgetId, Scene3D>,
     pub(crate) viewport_raw_fbo_id: Option<u32>,
     hud_visible: bool,
+    hud_hotkey_enabled: bool,
     perf_stats: PerfStats,
     frame_gen: u64,
     state_last_seen: HashMap<WidgetId, u64>,
@@ -663,6 +664,7 @@ impl UiContext {
             viewport_scenes: HashMap::new(),
             viewport_raw_fbo_id: None,
             hud_visible: false,
+            hud_hotkey_enabled: true,
             perf_stats: PerfStats::default(),
             frame_gen: 0,
             state_last_seen: HashMap::new(),
@@ -675,12 +677,29 @@ impl UiContext {
         self.hud_visible
     }
 
+    /// Alias for [`UiContext::is_hud_visible`]: returns whether the built-in telemetry HUD is visible.
+    pub fn hud_visible(&self) -> bool {
+        self.hud_visible
+    }
+
     /// Explicitly shows or hides the built-in `F12` telemetry overlay HUD.
     pub fn set_hud_visible(&mut self, visible: bool) {
         if self.hud_visible != visible {
             self.hud_visible = visible;
             self.dirty = true;
         }
+    }
+
+    /// Returns whether pressing `F12` automatically toggles the built-in telemetry HUD.
+    pub fn hud_hotkey_enabled(&self) -> bool {
+        self.hud_hotkey_enabled
+    }
+
+    /// Enables or disables the built-in `F12` hotkey that toggles the telemetry HUD.
+    ///
+    /// Defaults to `true`. Set to `false` in embedded hosts where the host application owns `F12`.
+    pub fn set_hud_hotkey_enabled(&mut self, enabled: bool) {
+        self.hud_hotkey_enabled = enabled;
     }
 
     /// Returns the latest frame performance telemetry counters.
@@ -798,6 +817,46 @@ impl UiContext {
         self.focused_id
     }
 
+    /// Returns `true` when keyboard focus is currently held by a text-entry widget (`TextInput`).
+    pub fn is_text_input_focused(&self) -> bool {
+        self.focused_is_text
+    }
+
+    /// Clears keyboard focus, active text-input caret/IME state, and any pending keybind capture.
+    pub fn clear_focus(&mut self) {
+        let had_focus = self.focused_id.take().is_some();
+        let had_capture = self.capturing_keybind_id.take().is_some();
+        let had_text = self.focused_is_text;
+        self.focus_visible = false;
+        self.focused_is_text = false;
+        self.focused_caret = None;
+        self.focused_selection = None;
+        self.pending_ime_preedit = None;
+        self.pending_ime_commit = None;
+        if had_focus || had_capture || had_text {
+            self.dirty = true;
+        }
+    }
+
+    /// Returns the interactive widget ID currently under the pointer, if any.
+    pub fn hovered_id(&self) -> Option<WidgetId> {
+        self.hovered_id
+    }
+
+    /// Returns `true` if the pointer is currently over an interactive widget or any visible UI surface.
+    ///
+    /// Returns `false` when the pointer is outside the viewport (after [`UiContext::on_pointer_leave`])
+    /// or over transparent click-through gaps between floating panels.
+    pub fn is_pointer_over_ui(&self) -> bool {
+        if self.hovered_id.is_some() {
+            return true;
+        }
+        let Some([px, py]) = self.pointer_pos else {
+            return false;
+        };
+        self.draw_list_contains_point(px, py)
+    }
+
     /// Returns `true` if `key` was pressed this frame outside of text input and keybind capture.
     pub fn shortcut_pressed(&self, key: Key) -> bool {
         !self.focused_is_text
@@ -808,6 +867,11 @@ impl UiContext {
     /// Returns `true` if `Escape` dismissal was triggered before or during this frame.
     pub fn dismiss_requested(&self) -> bool {
         self.dismiss_requested
+    }
+
+    /// Returns `true` if the UI has pending state changes that require a redraw without clearing the latch.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
     }
 
     /// Returns `true` if the UI needs a redraw and clears the dirty latch.
@@ -3207,5 +3271,101 @@ mod tests {
             "grid rich with wrap() overflowed col_w=145: {}",
             labels[1].w
         );
+    }
+
+    #[test]
+    fn embedded_host_helpers_leave_cancel_focus_hover_and_hud_hotkey() {
+        let mut ui = UiContext::new();
+        let mut text = crate::ui::text_edit::TextEditState::new();
+        let mut clicks = 0usize;
+
+        let render = |ui: &mut UiContext,
+                          text: &mut crate::ui::text_edit::TextEditState,
+                          clicks: &mut usize| {
+            ui.begin_frame(400.0, 300.0, 1.0);
+            ui.col(|ui| {
+                if ui.btn("Action").w(120.0).h(32.0).clicked() {
+                    *clicks += 1;
+                }
+                ui.input("field", text).w(160.0).h(32.0);
+                // Non-interactive opaque panel for is_pointer_over_ui check.
+                ui.col(|_| {}).w(120.0).h(40.0).bg(Color::rgb(20, 30, 40));
+            })
+            .w(180.0)
+            .gap(8.0);
+            ui.end_frame();
+        };
+
+        render(&mut ui, &mut text, &mut clicks);
+        let btn_bounds = ui
+            .semantics()
+            .iter()
+            .find(|n| n.label == "Action")
+            .unwrap()
+            .bounds;
+        let input_bounds = ui
+            .semantics()
+            .iter()
+            .find(|n| n.role == Role::TextInput)
+            .unwrap()
+            .bounds;
+
+        // Hovering button sets hovered_id and is_pointer_over_ui.
+        assert!(ui.on_pointer_move(btn_bounds.x + 10.0, btn_bounds.y + 10.0));
+        assert!(ui.hovered_id().is_some());
+        assert!(ui.is_pointer_over_ui());
+
+        // Pressing then cancelling must NOT fire a click on the next frame.
+        ui.on_pointer_down(PointerButton::Left);
+        assert!(ui.on_pointer_cancel());
+        assert!(!ui.on_pointer_cancel());
+        ui.on_pointer_up(PointerButton::Left);
+        render(&mut ui, &mut text, &mut clicks);
+        assert_eq!(clicks, 0);
+
+        // Moving over the opaque non-interactive panel: hovered_id is None, is_pointer_over_ui is true.
+        let panel_y = input_bounds.y + input_bounds.h + 16.0;
+        ui.on_pointer_move(20.0, panel_y);
+        assert_eq!(ui.hovered_id(), None);
+        assert!(ui.is_pointer_over_ui());
+
+        // Moving into transparent empty area outside panels: is_pointer_over_ui is false.
+        ui.on_pointer_move(350.0, 250.0);
+        assert_eq!(ui.hovered_id(), None);
+        assert!(!ui.is_pointer_over_ui());
+
+        // Hovering button again, then leaving clears pointer_pos, hovered_id, and returns true.
+        assert!(ui.on_pointer_move(btn_bounds.x + 10.0, btn_bounds.y + 10.0));
+        assert!(ui.hovered_id().is_some());
+        assert!(ui.on_pointer_leave());
+        assert_eq!(ui.pointer_pos(), None);
+        assert_eq!(ui.hovered_id(), None);
+        assert!(!ui.is_pointer_over_ui());
+        assert!(!ui.on_pointer_leave());
+
+        // Focus text input -> is_text_input_focused() == true; clear_focus() clears it.
+        ui.on_pointer_move(input_bounds.x + 10.0, input_bounds.y + 10.0);
+        ui.on_pointer_down(PointerButton::Left);
+        ui.on_pointer_up(PointerButton::Left);
+        render(&mut ui, &mut text, &mut clicks);
+        assert!(ui.is_text_input_focused());
+        assert!(ui.focused_id().is_some());
+        ui.clear_focus();
+        assert!(!ui.is_text_input_focused());
+        assert_eq!(ui.focused_id(), None);
+
+        // HUD hotkey defaults to enabled; disabling prevents F12 from toggling HUD.
+        assert!(ui.hud_hotkey_enabled());
+        assert!(!ui.hud_visible());
+        ui.on_key_down(Key::F12, Modifiers::default());
+        assert!(ui.hud_visible());
+        ui.set_hud_visible(false);
+        assert!(!ui.hud_visible());
+
+        ui.set_hud_hotkey_enabled(false);
+        assert!(!ui.hud_hotkey_enabled());
+        ui.on_key_down(Key::F12, Modifiers::default());
+        assert!(!ui.hud_visible());
+        assert!(ui.shortcut_pressed(Key::F12));
     }
 }

@@ -8,9 +8,9 @@ pub mod viewport;
 
 use crate::gfx::sdf::SdfBatch;
 use crate::gfx::text::GlyphAtlas;
-use crate::os::GlBackend;
+use crate::os::{GlBackend, RenderTargetHandle};
 use crate::ui::draw::DrawList;
-use crate::ui::types::Theme;
+use crate::ui::types::{Color, Theme};
 
 /// Phase 2 GPU renderer holding the dynamic glyph atlas and instanced SDF batcher.
 pub struct Renderer {
@@ -72,7 +72,7 @@ impl Renderer {
         (self.last_gpu_time_ms, self.last_gpu_buffer_bytes)
     }
 
-    /// Compiles `draw_list` to instanced SDF primitives, syncs the glyph atlas, and draws.
+    /// Compiles `draw_list` to instanced SDF primitives, syncs the glyph atlas, and draws to the default framebuffer.
     pub fn render_frame(
         &mut self,
         gl: &mut GlBackend,
@@ -80,6 +80,29 @@ impl Renderer {
         scale_factor: f32,
         cursor_logical: Option<[f32; 2]>,
         theme: &Theme,
+        draw_list: &DrawList,
+    ) {
+        self.render_frame_to(
+            gl,
+            RenderTargetHandle::DEFAULT,
+            physical_size,
+            scale_factor,
+            cursor_logical,
+            theme.background,
+            draw_list,
+        );
+    }
+
+    /// Compiles `draw_list` to instanced SDF primitives, syncs the glyph atlas, and draws into `target` with `clear_color`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render_frame_to(
+        &mut self,
+        gl: &mut GlBackend,
+        target: RenderTargetHandle,
+        physical_size: [u32; 2],
+        scale_factor: f32,
+        cursor_logical: Option<[f32; 2]>,
+        clear_color: Color,
         draw_list: &DrawList,
     ) {
         let [physical_width, physical_height] = physical_size;
@@ -104,10 +127,11 @@ impl Renderer {
         }
 
         self.batch.write_bytes_into(&mut self.instance_bytes);
-        gl.render_sdf_batch(
+        gl.render_sdf_batch_handle(
+            target,
             physical_width,
             physical_height,
-            theme.background,
+            clear_color,
             &self.batch,
             &self.instance_bytes,
         );

@@ -779,6 +779,18 @@ impl<F: FnMut(&mut UiContext, &mut App)> ApplicationHandler<UserEvent> for OsApp
                     }
                 }
             }
+            WindowEvent::CursorLeft { .. } => {
+                if let Some(win) = self.windows.get_mut(&window_id) {
+                    if win.ui.on_pointer_leave() {
+                        win.dirty = true;
+                    }
+                    let next_cursor = win.ui.active_cursor();
+                    if next_cursor != win.last_cursor {
+                        win.last_cursor = next_cursor;
+                        win.window.set_cursor(map_cursor_icon(next_cursor));
+                    }
+                }
+            }
             WindowEvent::MouseInput { state, button, .. } => {
                 if let Some(btn) = map_mouse_button(button) {
                     let custom_resizable =

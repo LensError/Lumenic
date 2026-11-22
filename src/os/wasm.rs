@@ -279,6 +279,18 @@ impl<F: FnMut(&mut UiContext, &mut App)> ApplicationHandler<UserEvent> for WasmA
                     }
                 }
             }
+            WindowEvent::CursorLeft { .. } => {
+                if let Some(win) = self.windows.get_mut(&window_id) {
+                    if self.ui.on_pointer_leave() {
+                        win.dirty = true;
+                    }
+                    let next_cursor = self.ui.active_cursor();
+                    if next_cursor != win.last_cursor {
+                        win.last_cursor = next_cursor;
+                        win.window.set_cursor(map_cursor_icon(next_cursor));
+                    }
+                }
+            }
             WindowEvent::MouseInput { state, button, .. } => {
                 if let Some(btn) = map_mouse_button(button) {
                     match state {

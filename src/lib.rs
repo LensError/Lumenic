@@ -33,6 +33,7 @@
 //!
 //! ## Architecture & Core Types
 //! - **Entrypoint & Windowing:** [`run`], [`WindowConfig`], [`LoopMode`], [`Decorations`], [`App`] (window controls, `request_attention` / `clear_attention`, popovers, texture upload/destroy, `pick_file` / `save_file` / `pick_folder`), [`PopoverId`], [`CsdAction`], [`Waker`].
+//! - **Offscreen / Embedded GPU Host (Native):** [`OffscreenHost`], [`OffscreenSurface`], [`OffscreenSurfaceConfig`], [`OffscreenSurfaceId`] (multi-surface OpenGL 3.3 Core FBO host without a `winit` event loop, zero-allocation RGBA readback, deterministic `Drop` teardown).
 //! - **Layout & Styling:** [`UiContext`] (flex containers, split panes, virtualized lists, `table` / `data_grid`, `tabs` / `segmented_control`, `collapsing_header` / `tree_view`, `radio` / `radio_group`, `toggle` / `checkbox`, `slider` / `range_slider`, `number_input`, `color_picker`, `input` / `password_input` / `textarea`, `dropdown` / `combobox`, `context_menu`, `modal`, `progress_bar`, `spinner`, `badge`, `toasts`, `sparkline`, `viewport`), [`StyleBuilder`], [`ButtonResponse`], [`RichResponse`], [`TableColumn`], [`TableState`], [`ToastQueue`], [`ToastItem`], [`ToastLevel`], [`Theme`], [`Color`], [`Rect`], [`RectShape`], [`Span`].
 //! - **Text Editing:** [`TextEditState`] (UTF-8 gap buffer with grapheme cursor, selection, clipboard, IME preedit, and [`History`] undo/redo).
 //! - **2D & 3D Viewports:** [`Canvas2D`], [`Scene3D`], [`Camera3D`], [`MeshData`], [`Vertex3D`], [`Material`], [`Transform3D`], [`MeshId`], [`NodeId`], [`TextureId`], [`TextureFilter`].
@@ -84,6 +85,8 @@ pub use gfx::viewport::{
 pub use os::dialogs::{DialogHandle, FileDialogRequest};
 pub use os::http::{HttpClient, HttpHandle, HttpLimits, HttpMethod, HttpRequest, HttpResponse};
 pub use os::ws::{WsClient, WsLimits, WsMessage};
+#[cfg(not(target_arch = "wasm32"))]
+pub use os::{OffscreenHost, OffscreenSurface, OffscreenSurfaceConfig, OffscreenSurfaceId};
 pub use os::{attach_cli_console_if_needed, run, App, TrayConfig, TrayEvent, TrayMenuItem, Waker};
 pub use sys::arena::FrameArena;
 pub use sys::history::History;

@@ -52,6 +52,57 @@ impl UiContext {
         needs_redraw
     }
 
+    /// Clears active pointer coordinates, hover state, and tooltip timers when the cursor leaves the surface.
+    ///
+    /// Returns `true` if clearing hover, cursor glow, or tooltip state requires a redraw.
+    pub fn on_pointer_leave(&mut self) -> bool {
+        let had_pointer = self.pointer_pos.take().is_some();
+        self.prev_pointer_pos = None;
+        let had_hover = self.hovered_id.take().is_some();
+        let had_anchor = self.hover_anchor_id.take().is_some();
+        let had_tooltip = self.pending_tooltip.take().is_some() || self.has_active_tooltip_timer;
+        self.hover_elapsed_s = 0.0;
+        self.has_active_tooltip_timer = false;
+        let needs_redraw =
+            had_hover || had_tooltip || (had_pointer && self.has_active_cursor_glow) || had_anchor;
+        if needs_redraw {
+            self.dirty = true;
+        }
+        needs_redraw
+    }
+
+    /// Cancels any active pointer press or drag interaction without emitting click callbacks.
+    ///
+    /// Returns `true` if an active press or drag state was cleared and requires a redraw.
+    pub fn on_pointer_cancel(&mut self) -> bool {
+        let mut had_scrollbar_drag = false;
+        for sc in self.scroll_states.values_mut() {
+            if sc.scrollbar_drag_offset.take().is_some() {
+                had_scrollbar_drag = true;
+            }
+        }
+        let had_pressed = self.pressed_id.take().is_some();
+        let had_right = self.pressed_right_id.take().is_some();
+        let had_just_pressed = self.just_pressed_id.take().is_some();
+        let had_table_drag = self.table_resize_drag.take().is_some();
+        let had_range_drag = !self.range_drag_thumb.is_empty();
+        let had_text_drag = self.text_select_anchor.take().is_some();
+        self.just_pressed_pos = None;
+        self.frame_pointer_delta = [0.0, 0.0];
+        self.range_drag_thumb.clear();
+        let changed = had_pressed
+            || had_right
+            || had_just_pressed
+            || had_table_drag
+            || had_range_drag
+            || had_text_drag
+            || had_scrollbar_drag;
+        if changed {
+            self.dirty = true;
+        }
+        changed
+    }
+
     /// Processes a scroll wheel delta in logical scroll lines/units.
     pub fn on_scroll(&mut self, dx: f32, dy: f32) {
         self.frame_scroll_delta[0] += dx;
@@ -141,7 +192,7 @@ impl UiContext {
             return;
         }
 
-        if key == Key::F12 {
+        if key == Key::F12 && self.hud_hotkey_enabled {
             self.hud_visible = !self.hud_visible;
             self.dirty = true;
             return;
@@ -247,5 +298,116 @@ impl UiContext {
 
     pub(super) fn hit_test(&self, px: f32, py: f32) -> Option<WidgetId> {
         self.hit_test_node(px, py).map(|n| n.id)
+    }
+
+    pub(super) fn draw_list_contains_point(&self, px: f32, py: f32) -> bool {
+        fn rect_contains_transformed(rect: Rect, transform: [f32; 4], px: f32, py: f32) -> bool {
+            let [scale, rot, tx, ty] = transform;
+            let moved = Rect::new(rect.x + tx, rect.y + ty, rect.w, rect.h);
+            if (scale - 1.0).abs() <= 1e-4 && rot.abs() <= 1e-4 {
+                return moved.contains(px, py);
+            }
+            let safe_sc = if scale.is_finite() && scale > 0.001 {
+                scale
+            } else {
+                1.0
+            };
+            let cx = moved.x + moved.w * 0.5;
+            let cy = moved.y + moved.h * 0.5;
+            let dx = (px - cx) / safe_sc;
+            let dy = (py - cy) / safe_sc;
+            let cs = rot.cos();
+            let sn = rot.sin();
+            let lx = cx + (dx * cs + dy * sn);
+            let ly = cy + (-dx * sn + dy * cs);
+            moved.contains(lx, ly)
+        }
+
+        fn cmds_hit(cmds: &[DrawCmd], px: f32, py: f32) -> bool {
+            let mut clips: Vec<Rect> = Vec::new();
+            for cmd in cmds {
+                match cmd {
+                    DrawCmd::PushClip(r) => {
+                        let next = clips.last().map_or(*r, |prev| prev.intersect(*r));
+                        clips.push(next);
+                    }
+                    DrawCmd::PopClip => {
+                        clips.pop();
+                    }
+                    DrawCmd::Rect {
+                        rect,
+                        bg,
+                        bg_grad,
+                        border_width,
+                        border_color,
+                        bd_grad,
+                        glass,
+                        transform,
+                        ..
+                    } => {
+                        let visible = bg.a > 0
+                            || bg_grad.is_some()
+                            || *glass
+                            || (*border_width > 0.0 && (border_color.a > 0 || bd_grad.is_some()));
+                        if !visible {
+                            continue;
+                        }
+                        if clips.last().is_none_or(|c| c.contains(px, py))
+                            && rect_contains_transformed(*rect, *transform, px, py)
+                        {
+                            return true;
+                        }
+                    }
+                    DrawCmd::Image {
+                        rect,
+                        tint,
+                        border_width,
+                        border_color,
+                        transform,
+                        ..
+                    } => {
+                        let visible = tint.a > 0 || (*border_width > 0.0 && border_color.a > 0);
+                        if visible
+                            && clips.last().is_none_or(|c| c.contains(px, py))
+                            && rect_contains_transformed(*rect, *transform, px, py)
+                        {
+                            return true;
+                        }
+                    }
+                    DrawCmd::Text {
+                        rect,
+                        color,
+                        transform,
+                        ..
+                    } => {
+                        if color.a > 0
+                            && clips.last().is_none_or(|c| c.contains(px, py))
+                            && rect_contains_transformed(*rect, *transform, px, py)
+                        {
+                            return true;
+                        }
+                    }
+                    DrawCmd::RichText {
+                        rect, transform, ..
+                    } => {
+                        if clips.last().is_none_or(|c| c.contains(px, py))
+                            && rect_contains_transformed(*rect, *transform, px, py)
+                        {
+                            return true;
+                        }
+                    }
+                    DrawCmd::Sparkline { rect, .. } | DrawCmd::Viewport { rect, .. } => {
+                        if clips.last().is_none_or(|c| c.contains(px, py)) && rect.contains(px, py)
+                        {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        }
+
+        cmds_hit(&self.draw_list.overlay_cmds, px, py)
+            || cmds_hit(&self.draw_list.base_cmds, px, py)
     }
 }
