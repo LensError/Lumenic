@@ -344,7 +344,7 @@ impl SdfBatch {
                     transform,
                 } => {
                     if cull_enabled {
-                        let pad = shadow_blur.max(0.0) * 2.0 + border_width.max(0.0) + 1.0;
+                        let pad = shadow_blur.max(0.0) * 2.0 + border_width.max(0.0) + 4.0;
                         let visible = active_visible_clip(&clip_stack, viewport_logical);
                         let bounds = conservative_transformed_bounds(*rect, *transform, pad);
                         if !rects_overlap(bounds, visible) {
@@ -377,6 +377,8 @@ impl SdfBatch {
                         RectShape::Circle => 1.0,
                         RectShape::Squircle => 2.0,
                         RectShape::Bevel => 10.0,
+                        RectShape::Hexagon => 11.0,
+                        RectShape::HexagonPointy => 12.0,
                     };
 
                     if blur_px > 0.0 && shadow_color.a > 0 {
@@ -651,6 +653,8 @@ impl SdfBatch {
                         RectShape::Circle => 1.0,
                         RectShape::Squircle => 2.0,
                         RectShape::Bevel => 10.0,
+                        RectShape::Hexagon => 11.0,
+                        RectShape::HexagonPointy => 12.0,
                     };
                     self.instances.push(SdfInstance {
                         rect: [
@@ -984,7 +988,7 @@ void main() {
     vec2 corner = vec2(vx, vy);
 
     int kind = int(a_params.w + 0.5);
-    float pad = (kind == 3 || kind == 7) ? 0.0 : (a_params.z + 2.0);
+    float pad = (kind == 3 || kind == 7) ? 0.0 : ((kind == 6) ? (a_params.z * 1.5 + 4.0) : (a_params.z + 2.0));
 
     vec2 base_xy = a_rect.xy;
     vec2 base_wh = a_rect.zw;
@@ -1079,6 +1083,23 @@ float sd_bevel_box4(vec2 p, vec2 half_sz, vec4 b4) {
     return max(d_box, d_chamfer);
 }
 
+// Regular flat-top hexagon centered at origin with inradius (apothem) `r`.
+float sd_hexagon(vec2 p, float r) {
+    const vec3 k = vec3(-0.866025404, 0.5, 0.577350269);
+    p = abs(p);
+    p -= 2.0 * min(dot(k.xy, p), 0.0) * k.xy;
+    p -= vec2(clamp(p.x, -k.z * r, k.z * r), r);
+    return length(p) * sign(p.y);
+}
+
+float erf_approx(float x) {
+    float s = sign(x);
+    float a = abs(x);
+    float t = 1.0 + (0.278393 + (0.230389 + 0.078108 * (a * a)) * a) * a;
+    float t2 = t * t;
+    return s - s / (t2 * t2);
+}
+
 float sd_segment(vec2 p, vec2 a, vec2 b) {
     vec2 pa = p - a;
     vec2 ba = b - a;
@@ -1162,13 +1183,24 @@ void main() {
         r4 = vec4(min_half * 0.44);
     }
 
-    float d = (sub_shape == 10)
-        ? sd_bevel_box4(p, half_sz, r4) * sc
-        : sd_rounded_box4(p, half_sz, r4) * sc;
+    float d;
+    if (sub_shape == 10) {
+        d = sd_bevel_box4(p, half_sz, r4) * sc;
+    } else if (sub_shape == 11) {
+        float hex_r = min(half_sz.y, half_sz.x * 0.866025404);
+        d = sd_hexagon(p, hex_r) * sc;
+    } else if (sub_shape == 12) {
+        float hex_r = min(half_sz.x, half_sz.y * 0.866025404);
+        d = sd_hexagon(p.yx, hex_r) * sc;
+    } else {
+        d = sd_rounded_box4(p, half_sz, r4) * sc;
+    }
 
     if (kind == 6) {
         float blur = max(v_params.z, 1.0);
-        float sa = 1.0 - smoothstep(-blur * 0.4, blur, d);
+        float gauss = 0.5 * (1.0 - erf_approx(d / (blur * 0.5)));
+        float cutoff = 1.0 - smoothstep(blur * 1.25, blur * 1.5, d);
+        float sa = gauss * cutoff;
         frag_color = vec4(v_bg.rgb, v_bg.a * sa);
         if (frag_color.a <= 0.001) discard;
         return;
@@ -1644,5 +1676,59 @@ mod tests {
             .iter()
             .any(|i| (i.rect[1] - 20.0).abs() < 0.5));
         assert!(batch.instances.len() > 1);
+    }
+
+    #[test]
+    fn hexagon_and_pointy_hexagon_encode_rect_shadow_and_image_shape_codes() {
+        let mut draw_list = DrawList::default();
+        draw_list.base_cmds.push(DrawCmd::Rect {
+            rect: Rect::new(10.0, 10.0, 42.0, 42.0),
+            bg: Color::from_hex(0x38BDF8),
+            bg_grad: None,
+            border_width: 2.0,
+            border_color: Color::WHITE,
+            bd_grad: None,
+            radius: 0.0,
+            corner_radii: [0.0; 4],
+            shadow_blur: 10.0,
+            shadow_color: Color::rgba(0, 0, 0, 125),
+            shape: RectShape::Hexagon,
+            glass: false,
+            cursor_glow: false,
+            ripple: None,
+            shimmer_phase: None,
+            transform: [1.0, 0.0, 0.0, 0.0],
+        });
+        draw_list.base_cmds.push(DrawCmd::Image {
+            rect: Rect::new(60.0, 10.0, 42.0, 42.0),
+            tex: TextureId(7),
+            filter: TextureFilter::Linear,
+            uv: [0.0, 0.0, 1.0, 1.0],
+            tint: Color::WHITE,
+            border_width: 2.0,
+            border_color: Color::from_hex(0x38BDF8),
+            radius: 0.0,
+            corner_radii: [0.0; 4],
+            shape: RectShape::HexagonPointy,
+            transform: [1.0, 0.0, 0.0, 0.0],
+        });
+
+        let mut atlas = GlyphAtlas::new_fallback_only();
+        let mut batch = SdfBatch::default();
+        batch.build(&draw_list, &mut atlas, 1.0, None, 400, 200);
+
+        // Shadow instance for flat-top hexagon: kind == 6.0, sub_shape == 11.0.
+        assert!(batch.instances.iter().any(|i| {
+            (i.radii_and_border[3] - 6.0).abs() < 1e-4 && (i.glow_and_clip[2] - 11.0).abs() < 1e-4
+        }));
+        // Rect instance for flat-top hexagon: kind == 11.0.
+        assert!(batch
+            .instances
+            .iter()
+            .any(|i| (i.radii_and_border[3] - 11.0).abs() < 1e-4));
+        // Image instance for pointy-top hexagon: kind == 8.0, sub_shape == 12.0.
+        assert!(batch.instances.iter().any(|i| {
+            (i.radii_and_border[3] - 8.0).abs() < 1e-4 && (i.glow_and_clip[2] - 12.0).abs() < 1e-4
+        }));
     }
 }

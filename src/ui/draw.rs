@@ -174,7 +174,7 @@ pub enum DrawCmd {
         shadow_blur: f32,
         /// Drop-shadow color.
         shadow_color: Color,
-        /// Corner geometry mode (`Box`, `Circle`, or `Squircle`).
+        /// Corner geometry mode (`Box`, `Circle`, `Squircle`, `Bevel`, `Hexagon`, or `HexagonPointy`).
         shape: RectShape,
         /// Enables Dual-Kawase frosted glass backdrop blur.
         glass: bool,
@@ -236,7 +236,7 @@ pub enum DrawCmd {
         radius: f32,
         /// Independent corner radii `[tl, tr, br, bl]` in logical points.
         corner_radii: [f32; 4],
-        /// Clip mask shape (`Box`, `Circle`, `Squircle`, or `Bevel`).
+        /// Clip mask shape (`Box`, `Circle`, `Squircle`, `Bevel`, `Hexagon`, or `HexagonPointy`).
         shape: RectShape,
         /// 2D transform `[scale, rotate_rad, translate_x, translate_y]`.
         transform: [f32; 4],

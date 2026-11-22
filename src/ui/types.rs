@@ -423,6 +423,10 @@ pub enum RectShape {
     Squircle,
     /// 45-degree chamfered / beveled corner box.
     Bevel,
+    /// Regular flat-top hexagon inscribed in the node bounds.
+    Hexagon,
+    /// Regular pointy-top hexagon inscribed in the node bounds.
+    HexagonPointy,
 }
 
 /// Main-axis distribution mode for `row` and `col` containers.

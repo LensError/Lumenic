@@ -570,6 +570,18 @@ macro_rules! impl_style_methods {
                 self
             }
 
+            /// Renders this node's SDF background, border, shadow, and image clip mask as a regular flat-top hexagon.
+            pub fn hexagon(self) -> Self {
+                self.ui.nodes[self.node_idx].style.shape = RectShape::Hexagon;
+                self
+            }
+
+            /// Renders this node's SDF background, border, shadow, and image clip mask as a regular pointy-top hexagon.
+            pub fn hexagon_pointy(self) -> Self {
+                self.ui.nodes[self.node_idx].style.shape = RectShape::HexagonPointy;
+                self
+            }
+
             /// Overrides hover foreground text color (`:hover { color }`).
             pub fn hover_fg(self, color: Color) -> Self {
                 self.ui.nodes[self.node_idx].style.hover_fg = Some(color);

@@ -54,6 +54,34 @@ fn sd_rounded_box(px: f32, py: f32, hx: f32, hy: f32, r: f32) -> f32 {
     qx.max(qy).min(0.0) + (mx * mx + my * my).sqrt() - r
 }
 
+fn sd_hexagon(px: f32, py: f32, r: f32) -> f32 {
+    const KX: f32 = -0.866_025_4;
+    const KY: f32 = 0.5;
+    const KZ: f32 = 0.577_350_26;
+    let mut x = px.abs();
+    let mut y = py.abs();
+    let dot_k = (KX * x + KY * y).min(0.0);
+    x -= 2.0 * dot_k * KX;
+    y -= 2.0 * dot_k * KY;
+    x -= x.clamp(-KZ * r, KZ * r);
+    y -= r;
+    (x * x + y * y).sqrt() * if y < 0.0 { -1.0 } else { 1.0 }
+}
+
+fn erf_approx(x: f32) -> f32 {
+    let s = if x < 0.0 {
+        -1.0
+    } else if x > 0.0 {
+        1.0
+    } else {
+        0.0
+    };
+    let a = x.abs();
+    let t = 1.0 + (0.278_393 + (0.230_389 + 0.078_108 * (a * a)) * a) * a;
+    let t2 = t * t;
+    s - s / (t2 * t2)
+}
+
 fn sd_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
     let pax = px - ax;
     let pay = py - ay;
@@ -169,6 +197,8 @@ fn rasterize_instance(
     let kind = (inst.radii_and_border[3] + 0.5) as i32;
     let pad = if kind == 3 {
         0.0
+    } else if kind == 6 {
+        inst.radii_and_border[2] * 1.5 + 4.0
     } else {
         inst.radii_and_border[2] + 2.0
     };
@@ -353,13 +383,21 @@ fn rasterize_instance(
                 let d_box = sd_rounded_box(px_local, py_local, hx, hy, 0.0);
                 let d_chamfer = (pa_x + pa_y - (hx + hy - r)) * core::f32::consts::FRAC_1_SQRT_2;
                 d_box.max(d_chamfer) * sc
+            } else if sub_shape == 11 {
+                let hex_r = hy.min(hx * 0.866_025_4);
+                sd_hexagon(px_local, py_local, hex_r) * sc
+            } else if sub_shape == 12 {
+                let hex_r = hx.min(hy * 0.866_025_4);
+                sd_hexagon(py_local, px_local, hex_r) * sc
             } else {
                 sd_rounded_box(px_local, py_local, hx, hy, r) * sc
             };
 
             if kind == 6 {
                 let blur = inst.radii_and_border[2].max(1.0);
-                let sa = 1.0 - smoothstep(-blur * 0.4, blur, d);
+                let gauss = 0.5 * (1.0 - erf_approx(d / (blur * 0.5)));
+                let cutoff = 1.0 - smoothstep(blur * 1.25, blur * 1.5, d);
+                let sa = gauss * cutoff;
                 blend_pixel(
                     buf,
                     dst_idx,
@@ -1149,6 +1187,132 @@ mod tests {
         let mix_tl = (8 * 140 + 68) * 4;
         assert!(img.data[mix_tr + 2] > 180);
         assert!(img.data[mix_tl + 2] < 80);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hexagon_and_pointy_hexagon_rasterize_cleanly() {
+        let dir = std::env::temp_dir().join("lumenic_inspect_hexagon_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let opts = InspectOptions {
+            width: 160,
+            height: 70,
+            scale_factor: 1.0,
+            out_png: dir.join("hex.png"),
+            out_json: dir.join("hex.json"),
+        };
+
+        inspect_to_files(&opts, |ui, _app| {
+            ui.row(|ui| {
+                ui.col(|_| {})
+                    .w(48.0)
+                    .h(48.0)
+                    .bg(Color::from_hex(0xEF4444))
+                    .bd(2.0, Color::WHITE)
+                    .hexagon();
+                ui.col(|_| {})
+                    .w(48.0)
+                    .h(48.0)
+                    .bg(Color::from_hex(0x3B82F6))
+                    .bd(2.0, Color::WHITE)
+                    .hexagon_pointy();
+            })
+            .p(10.0)
+            .gap(16.0);
+        })
+        .expect("inspect hexagon succeeds");
+
+        let png_bytes = std::fs::read(&opts.out_png).expect("png exists");
+        let img = decode_png(&png_bytes).expect("valid png");
+
+        // Flat-top hexagon occupies [10..58, 10..58], center at (34, 34).
+        let flat_center = (34 * 160 + 34) * 4;
+        let flat_tl_corner = (10 * 160 + 10) * 4;
+        // Top-most pixel (34, 11) is outside flat-top hexagon (inradius = 24 * 0.866 = 20.78 -> top edge at y = 13.2).
+        let flat_top_outside = (11 * 160 + 34) * 4;
+        assert!(img.data[flat_center] > 180);
+        assert!(img.data[flat_tl_corner] < 80);
+        assert!(img.data[flat_top_outside] < 80);
+
+        // Pointy-top hexagon occupies [74..122, 10..58], center at (98, 34).
+        let pointy_center = (34 * 160 + 98) * 4;
+        let pointy_tl_corner = (10 * 160 + 74) * 4;
+        // Left-most pixel (75, 34) is outside pointy-top hexagon (inradius = 20.78 -> left edge at x = 77.2).
+        let pointy_left_outside = (34 * 160 + 75) * 4;
+        assert!(img.data[pointy_center + 2] > 180);
+        assert!(img.data[pointy_tl_corner + 2] < 80);
+        assert!(img.data[pointy_left_outside + 2] < 80);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shadow_falloff_reaches_zero_smoothly_without_hard_edge_seam() {
+        let dir = std::env::temp_dir().join("lumenic_inspect_shadow_falloff_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let opts = InspectOptions {
+            width: 200,
+            height: 120,
+            scale_factor: 1.0,
+            out_png: dir.join("shadow.png"),
+            out_json: dir.join("shadow.json"),
+        };
+
+        inspect_to_files(&opts, |ui, _app| {
+            let mut theme = *ui.theme();
+            theme.background = Color::WHITE;
+            ui.set_theme(theme);
+            ui.col(|ui| {
+                ui.col(|_| {})
+                    .w(100.0)
+                    .h(40.0)
+                    .bg(Color::rgb(20, 24, 34))
+                    .bevel(10.0)
+                    .shadow(14.0, Color::rgba(0, 0, 0, 180));
+            })
+            .p(40.0);
+        })
+        .expect("inspect shadow succeeds");
+
+        let png_bytes = std::fs::read(&opts.out_png).expect("png exists");
+        let img = decode_png(&png_bytes).expect("valid png");
+
+        // Card is at x=[40..140], y=[40..80]; sample horizontal midline y=60 moving outward from left/right edges.
+        let sample_r = |x: usize| img.data[(60 * 200 + x) * 4];
+        // Right outside left edge (x=39) should be darkened by shadow.
+        assert!(sample_r(39) < 220);
+        // Moving outward on the left (39 -> 15), brightness must increase monotonically and reach 255 before quad edge.
+        let mut prev_l = sample_r(39);
+        for x in (15..39).rev() {
+            let cur = sample_r(x);
+            assert!(
+                cur >= prev_l,
+                "left shadow must fade monotonically at x={x}: {cur} < {prev_l}"
+            );
+            assert!(
+                cur.saturating_sub(prev_l) <= 45,
+                "left shadow must not have a hard step seam at x={x}: {prev_l} -> {cur}"
+            );
+            prev_l = cur;
+        }
+        assert_eq!(sample_r(17), 255);
+
+        // Moving outward on the right (140 -> 165), brightness must increase monotonically and reach 255 before quad edge.
+        let mut prev_r = sample_r(140);
+        for x in 141..=165 {
+            let cur = sample_r(x);
+            assert!(
+                cur >= prev_r,
+                "right shadow must fade monotonically at x={x}: {cur} < {prev_r}"
+            );
+            assert!(
+                cur.saturating_sub(prev_r) <= 45,
+                "right shadow must not have a hard step seam at x={x}: {prev_r} -> {cur}"
+            );
+            prev_r = cur;
+        }
+        assert_eq!(sample_r(163), 255);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
