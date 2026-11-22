@@ -339,37 +339,52 @@ impl Canvas2D {
             return;
         }
         let mut idx_list: Vec<usize> = (0..verts.len()).collect();
-        let mut guard = verts.len().saturating_mul(verts.len());
+        let mut guard = verts.len().saturating_mul(verts.len()).saturating_add(16);
         while idx_list.len() > 3 && guard > 0 {
             guard -= 1;
             let n = idx_list.len();
             let mut clipped = false;
-            for i in 0..n {
-                let prev = idx_list[(i + n - 1) % n];
-                let curr = idx_list[i];
-                let next = idx_list[(i + 1) % n];
-                let (a, b, c) = (verts[prev], verts[curr], verts[next]);
-                if cross2d(a, b, c) <= 1e-5 {
-                    continue;
-                }
-                let contains_other = idx_list.iter().any(|&k| {
-                    k != prev
-                        && k != curr
-                        && k != next
-                        && !pts_close(verts[k], a)
-                        && !pts_close(verts[k], b)
-                        && !pts_close(verts[k], c)
-                        && point_in_tri(verts[k], a, b, c)
-                });
-                if !contains_other {
-                    self.cmds.push(Canvas2DCmd::Tri {
-                        p0: a,
-                        p1: b,
-                        p2: c,
-                        color,
+            for pass in 0..2 {
+                let area_eps = if pass == 0 { 1e-5 } else { -1e-5 };
+                for i in 0..n {
+                    let prev = idx_list[(i + n - 1) % n];
+                    let curr = idx_list[i];
+                    let next = idx_list[(i + 1) % n];
+                    let (a, b, c) = (verts[prev], verts[curr], verts[next]);
+                    let cr = cross2d(a, b, c);
+                    if cr <= area_eps {
+                        continue;
+                    }
+                    let contains_other = idx_list.iter().any(|&k| {
+                        if k == prev
+                            || k == curr
+                            || k == next
+                            || pts_close(verts[k], a)
+                            || pts_close(verts[k], b)
+                            || pts_close(verts[k], c)
+                        {
+                            return false;
+                        }
+                        if point_on_seg(verts[k], a, b) || point_on_seg(verts[k], b, c) {
+                            return false;
+                        }
+                        point_in_tri(verts[k], a, b, c)
                     });
-                    idx_list.remove(i);
-                    clipped = true;
+                    if !contains_other {
+                        if cr > 1e-5 {
+                            self.cmds.push(Canvas2DCmd::Tri {
+                                p0: a,
+                                p1: b,
+                                p2: c,
+                                color,
+                            });
+                        }
+                        idx_list.remove(i);
+                        clipped = true;
+                        break;
+                    }
+                }
+                if clipped {
                     break;
                 }
             }
@@ -438,31 +453,71 @@ impl Canvas2D {
         }
     }
 
-    /// Parses and renders an SVG icon path fitted into `size x size` pixels (assuming a `24x24` viewBox unless coordinates exceed `24.5`).
-    pub fn svg_icon_path(&mut self, d: &str, size: f32, color: Color) {
-        let subpaths = parse_svg_path_subpaths(d);
-        let mut max_coord = 0.0_f32;
-        for (pts, _) in &subpaths {
-            for &[x, y] in pts {
-                max_coord = max_coord.max(x.abs()).max(y.abs());
-            }
-        }
-        let vb = if max_coord > 24.5 { max_coord } else { 24.0 };
-        let scale = (size.max(1.0)) / vb;
-        let stroke_w = (1.8 * scale).max(1.0);
+    /// Parses and renders an SVG icon path or `<svg viewBox="...">` markup fitted into `size x size` pixels.
+    pub fn svg_icon_path(&mut self, d_or_svg: &str, size: f32, color: Color) {
+        let (path_d, explicit_vb) = extract_svg_markup_d_and_viewbox(d_or_svg);
+        let subpaths = parse_svg_path_subpaths(&path_d);
+        let vb = explicit_vb.unwrap_or_else(|| infer_svg_viewbox(&subpaths));
+        self.render_svg_subpaths(&subpaths, vb, size, color);
+    }
+
+    /// Parses and renders an SVG icon path fitted from an explicit `viewbox` (`[min_x, min_y, width, height]`) into `size x size` pixels.
+    pub fn svg_icon_path_viewbox(
+        &mut self,
+        d_or_svg: &str,
+        viewbox: [f32; 4],
+        size: f32,
+        color: Color,
+    ) {
+        let (path_d, _) = extract_svg_markup_d_and_viewbox(d_or_svg);
+        let subpaths = parse_svg_path_subpaths(&path_d);
+        self.render_svg_subpaths(&subpaths, viewbox, size, color);
+    }
+
+    fn render_svg_subpaths(
+        &mut self,
+        subpaths: &[(Vec<[f32; 2]>, bool)],
+        viewbox: [f32; 4],
+        size: f32,
+        color: Color,
+    ) {
+        let vb_x = if viewbox[0].is_finite() {
+            viewbox[0]
+        } else {
+            0.0
+        };
+        let vb_y = if viewbox[1].is_finite() {
+            viewbox[1]
+        } else {
+            0.0
+        };
+        let vb_w = if viewbox[2].is_finite() && viewbox[2] > 0.0 {
+            viewbox[2]
+        } else {
+            24.0
+        };
+        let vb_h = if viewbox[3].is_finite() && viewbox[3] > 0.0 {
+            viewbox[3]
+        } else {
+            24.0
+        };
+        let sz = size.max(1.0);
+        let scale_x = sz / vb_w;
+        let scale_y = sz / vb_h;
+        let stroke_w = (1.8 * scale_x.min(scale_y)).max(1.0);
         let mut closed_rings: Vec<Vec<[f32; 2]>> = Vec::new();
         for (pts, closed) in subpaths {
             if pts.is_empty() {
                 continue;
             }
             let mapped: Vec<[f32; 2]> = pts
-                .into_iter()
-                .map(|[x, y]| [x * scale, y * scale])
+                .iter()
+                .map(|&[x, y]| [(x - vb_x) * scale_x, (y - vb_y) * scale_y])
                 .collect();
-            if closed && mapped.len() >= 3 {
+            if *closed && mapped.len() >= 3 {
                 closed_rings.push(mapped);
             } else {
-                self.poly(&mapped, closed, stroke_w, color);
+                self.poly(&mapped, *closed, stroke_w, color);
             }
         }
         if !closed_rings.is_empty() {
@@ -594,10 +649,104 @@ fn pts_close(a: [f32; 2], b: [f32; 2]) -> bool {
     (a[0] - b[0]).abs() < 1e-4 && (a[1] - b[1]).abs() < 1e-4
 }
 
+fn point_on_seg(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> bool {
+    if cross2d(a, b, p).abs() > 1e-4 {
+        return false;
+    }
+    let min_x = a[0].min(b[0]) - 1e-4;
+    let max_x = a[0].max(b[0]) + 1e-4;
+    let min_y = a[1].min(b[1]) - 1e-4;
+    let max_y = a[1].max(b[1]) + 1e-4;
+    p[0] >= min_x && p[0] <= max_x && p[1] >= min_y && p[1] <= max_y
+}
+
+fn segs_properly_intersect(p1: [f32; 2], p2: [f32; 2], q1: [f32; 2], q2: [f32; 2]) -> bool {
+    if pts_close(p1, q1) || pts_close(p1, q2) || pts_close(p2, q1) || pts_close(p2, q2) {
+        return false;
+    }
+    let d1 = cross2d(q1, q2, p1);
+    let d2 = cross2d(q1, q2, p2);
+    let d3 = cross2d(p1, p2, q1);
+    let d4 = cross2d(p1, p2, q2);
+    if ((d1 > 1e-5 && d2 < -1e-5) || (d1 < -1e-5 && d2 > 1e-5))
+        && ((d3 > 1e-5 && d4 < -1e-5) || (d3 < -1e-5 && d4 > 1e-5))
+    {
+        return true;
+    }
+    if d1.abs() <= 1e-5 && point_on_seg(p1, q1, q2) {
+        return true;
+    }
+    if d2.abs() <= 1e-5 && point_on_seg(p2, q1, q2) {
+        return true;
+    }
+    if d3.abs() <= 1e-5 && point_on_seg(q1, p1, p2) {
+        return true;
+    }
+    if d4.abs() <= 1e-5 && point_on_seg(q2, p1, p2) {
+        return true;
+    }
+    false
+}
+
+fn bridge_is_visible(
+    m: [f32; 2],
+    target: [f32; 2],
+    outer: &[[f32; 2]],
+    holes: &[Vec<[f32; 2]>],
+    merged_flags: &[bool],
+) -> bool {
+    let on = outer.len();
+    for i in 0..on {
+        let a = outer[i];
+        let b = outer[(i + 1) % on];
+        if segs_properly_intersect(m, target, a, b) {
+            return false;
+        }
+    }
+    for (hi, h) in holes.iter().enumerate() {
+        if merged_flags[hi] {
+            continue;
+        }
+        let hn = h.len();
+        for i in 0..hn {
+            let a = h[i];
+            let b = h[(i + 1) % hn];
+            if segs_properly_intersect(m, target, a, b) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 fn dedup_ring(verts: &mut Vec<[f32; 2]>) {
     verts.dedup_by(|a, b| pts_close(*a, *b));
     while verts.len() > 2 && pts_close(verts[0], verts[verts.len() - 1]) {
         verts.pop();
+    }
+    let mut changed = true;
+    while changed && verts.len() > 3 {
+        changed = false;
+        let n = verts.len();
+        for i in 0..n {
+            let prev = verts[(i + n - 1) % n];
+            let curr = verts[i];
+            let next = verts[(i + 1) % n];
+            if pts_close(prev, curr) || pts_close(curr, next) {
+                verts.remove(i);
+                changed = true;
+                break;
+            }
+            let v1 = [curr[0] - prev[0], curr[1] - prev[1]];
+            let v2 = [next[0] - curr[0], next[1] - curr[1]];
+            let cr = v1[0] * v2[1] - v1[1] * v2[0];
+            let dt = v1[0] * v2[0] + v1[1] * v2[1];
+            if cr.abs() <= 1e-4 && dt >= -1e-5 {
+                verts.remove(i);
+                changed = true;
+                break;
+            }
+        }
     }
 }
 
@@ -653,19 +802,28 @@ fn interior_point(ring: &[[f32; 2]]) -> [f32; 2] {
 
 // Splices CW holes into a CCW outer ring via Eberly's rightmost-vertex ray-cast bridge.
 fn bridge_holes_into_outer(mut outer: Vec<[f32; 2]>, holes: &mut [Vec<[f32; 2]>]) -> Vec<[f32; 2]> {
-    let mut hole_order: Vec<(usize, f32)> = holes
+    let mut hole_order: Vec<(usize, f32, f32)> = holes
         .iter()
         .enumerate()
         .map(|(idx, h)| {
-            let max_x = h.iter().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max);
-            (idx, max_x)
+            let mut max_x = f32::NEG_INFINITY;
+            let mut max_y = f32::NEG_INFINITY;
+            for &p in h {
+                if p[0] > max_x || (p[0] == max_x && p[1] > max_y) {
+                    max_x = p[0];
+                    max_y = p[1];
+                }
+            }
+            (idx, max_x, max_y)
         })
         .collect();
-    hole_order.sort_by(|a, b| b.1.total_cmp(&a.1));
+    hole_order.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| b.2.total_cmp(&a.2)));
+    let mut merged_flags = vec![false; holes.len()];
 
-    for (h_idx, _) in hole_order {
+    for (h_idx, _, _) in hole_order {
         let hole = &holes[h_idx];
         if hole.len() < 3 || outer.len() < 3 {
+            merged_flags[h_idx] = true;
             continue;
         }
         let mut m_idx = 0usize;
@@ -683,7 +841,8 @@ fn bridge_holes_into_outer(mut outer: Vec<[f32; 2]>, holes: &mut [Vec<[f32; 2]>]
         for i in 0..on {
             let a = outer[i];
             let b = outer[(i + 1) % on];
-            let crosses_y = (a[1] <= m[1] && b[1] > m[1]) || (b[1] <= m[1] && a[1] > m[1]);
+            // Only consider downward edges (interior of CCW polygon is to the left of M -> hit_pt).
+            let crosses_y = a[1] >= m[1] && b[1] < m[1];
             if !crosses_y {
                 continue;
             }
@@ -696,7 +855,7 @@ fn bridge_holes_into_outer(mut outer: Vec<[f32; 2]>, holes: &mut [Vec<[f32; 2]>]
             }
         }
 
-        let bridge_outer_idx = if let Some(p_idx) = best_edge_p_idx {
+        let mut candidate_outer_idx = best_edge_p_idx.map(|p_idx| {
             let p = outer[p_idx];
             if (hit_pt[0] - p[0]).abs() < 1e-5 && (hit_pt[1] - p[1]).abs() < 1e-5 {
                 p_idx
@@ -734,29 +893,69 @@ fn bridge_holes_into_outer(mut outer: Vec<[f32; 2]>, holes: &mut [Vec<[f32; 2]>]
                 }
                 best_r
             }
-        } else {
-            // Fallback: nearest outer vertex to m.
-            let mut nearest = 0usize;
-            let mut best_d = f32::INFINITY;
+        });
+
+        if let Some(ci) = candidate_outer_idx {
+            if !bridge_is_visible(m, outer[ci], &outer, holes, &merged_flags) {
+                candidate_outer_idx = None;
+            }
+        }
+
+        let bridge_outer_idx = candidate_outer_idx.unwrap_or_else(|| {
+            let mut best_vis: Option<(usize, f32)> = None;
+            let mut nearest_any = (0usize, f32::INFINITY);
             for (ri, &r) in outer.iter().enumerate() {
                 let d = (r[0] - m[0]).powi(2) + (r[1] - m[1]).powi(2);
-                if d < best_d {
-                    best_d = d;
-                    nearest = ri;
+                if d < nearest_any.1 {
+                    nearest_any = (ri, d);
+                }
+                if d > 1e-8 && bridge_is_visible(m, r, &outer, holes, &merged_flags) {
+                    let prefer = r[0] >= m[0] - 1e-5;
+                    let score = if prefer { d } else { d + 1e6 };
+                    if best_vis.is_none_or(|(_, bs)| score < bs) {
+                        best_vis = Some((ri, score));
+                    }
                 }
             }
-            nearest
-        };
+            best_vis.map_or(nearest_any.0, |(ri, _)| ri)
+        });
+
+        // If `outer[bridge_outer_idx]` was already used by a prior bridge, pick the occurrence
+        // whose incident wedge `(prev, target, next)` contains `m`.
+        let target_pt = outer[bridge_outer_idx];
+        let mut chosen_idx = bridge_outer_idx;
+        let on = outer.len();
+        for ri in 0..on {
+            if !pts_close(outer[ri], target_pt) {
+                continue;
+            }
+            let prev = outer[(ri + on - 1) % on];
+            let curr = outer[ri];
+            let next = outer[(ri + 1) % on];
+            let c_corner = cross2d(prev, curr, next);
+            let c1 = cross2d(prev, curr, m);
+            let c2 = cross2d(curr, next, m);
+            let in_cone = if c_corner >= -1e-5 {
+                c1 >= -1e-5 && c2 >= -1e-5
+            } else {
+                c1 >= -1e-5 || c2 >= -1e-5
+            };
+            if in_cone {
+                chosen_idx = ri;
+                break;
+            }
+        }
 
         let mut merged = Vec::with_capacity(outer.len() + hole.len() + 2);
-        merged.extend_from_slice(&outer[..=bridge_outer_idx]);
+        merged.extend_from_slice(&outer[..=chosen_idx]);
         for k in 0..hole.len() {
             merged.push(hole[(m_idx + k) % hole.len()]);
         }
         merged.push(hole[m_idx]);
-        merged.push(outer[bridge_outer_idx]);
-        merged.extend_from_slice(&outer[bridge_outer_idx + 1..]);
+        merged.push(outer[chosen_idx]);
+        merged.extend_from_slice(&outer[chosen_idx + 1..]);
         outer = merged;
+        merged_flags[h_idx] = true;
     }
     outer
 }
@@ -765,6 +964,110 @@ fn bridge_holes_into_outer(mut outer: Vec<[f32; 2]>, holes: &mut [Vec<[f32; 2]>]
 enum SvgTok {
     Cmd(char),
     Num(f32),
+}
+
+fn infer_svg_viewbox(subpaths: &[(Vec<[f32; 2]>, bool)]) -> [f32; 4] {
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    for (pts, _) in subpaths {
+        for &[x, y] in pts {
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+    }
+    if !min_x.is_finite() || !min_y.is_finite() {
+        return [0.0, 0.0, 24.0, 24.0];
+    }
+    // Google Material Symbols standard coordinate space (`0 -960 960 960`).
+    if (-1024.0..-1.0).contains(&min_y) && max_x <= 1024.0 && max_y <= 64.0 {
+        return [0.0, -960.0, 960.0, 960.0];
+    }
+    let max_coord = max_x.abs().max(max_y.abs());
+    let vb = if max_coord > 24.5 {
+        if (900.0..=960.5).contains(&max_coord) && min_x >= 0.0 && min_y >= 0.0 {
+            960.0
+        } else {
+            max_coord
+        }
+    } else {
+        24.0
+    };
+    [0.0, 0.0, vb, vb]
+}
+
+fn parse_xml_attr<'a>(tag: &'a str, attr_lower: &str) -> Option<&'a str> {
+    let lower = tag.to_ascii_lowercase();
+    let mut search_from = 0usize;
+    while let Some(pos) = lower[search_from..].find(attr_lower) {
+        let abs = search_from + pos;
+        let prev_ok = abs == 0
+            || lower.as_bytes()[abs - 1].is_ascii_whitespace()
+            || matches!(lower.as_bytes()[abs - 1], b'<' | b'"' | b'\'');
+        let after = abs + attr_lower.len();
+        if prev_ok {
+            let rest = tag[after..].trim_start();
+            if let Some(after_eq) = rest.strip_prefix('=') {
+                let val_start = after_eq.trim_start();
+                if let Some(quote) = val_start.chars().next() {
+                    if quote == '"' || quote == '\'' {
+                        let inner = &val_start[1..];
+                        if let Some(end_q) = inner.find(quote) {
+                            return Some(&inner[..end_q]);
+                        }
+                    }
+                }
+            }
+        }
+        search_from = after;
+    }
+    None
+}
+
+fn extract_svg_markup_d_and_viewbox(input: &str) -> (String, Option<[f32; 4]>) {
+    let trimmed = input.trim();
+    if !trimmed.contains('<') {
+        return (String::from(trimmed), None);
+    }
+    let mut viewbox: Option<[f32; 4]> = None;
+    let mut combined_d = String::new();
+    let mut rest = trimmed;
+    while let Some(lt) = rest.find('<') {
+        let after_lt = &rest[lt + 1..];
+        let Some(gt) = after_lt.find('>') else {
+            break;
+        };
+        let tag = &after_lt[..gt];
+        if viewbox.is_none() {
+            if let Some(vb_str) = parse_xml_attr(tag, "viewbox") {
+                let nums: Vec<f32> = vb_str
+                    .split(|c: char| c.is_ascii_whitespace() || c == ',')
+                    .filter(|s| !s.is_empty())
+                    .filter_map(|s| s.parse::<f32>().ok())
+                    .collect();
+                if nums.len() == 4 && nums[2] > 0.0 && nums[3] > 0.0 {
+                    viewbox = Some([nums[0], nums[1], nums[2], nums[3]]);
+                }
+            }
+        }
+        if let Some(d_val) = parse_xml_attr(tag, "d") {
+            if !d_val.trim().is_empty() {
+                if !combined_d.is_empty() {
+                    combined_d.push(' ');
+                }
+                combined_d.push_str(d_val.trim());
+            }
+        }
+        rest = &after_lt[gt + 1..];
+    }
+    if combined_d.is_empty() {
+        (String::from(trimmed), viewbox)
+    } else {
+        (combined_d, viewbox)
+    }
 }
 
 fn tokenize_svg_path(d: &str) -> Vec<SvgTok> {
@@ -2170,5 +2473,98 @@ mod tests {
             !tris.iter().any(|&t| tri_covers([12.0, 12.0], t)),
             "inner cutout center (12, 12) must remain hollow"
         );
+    }
+
+    #[test]
+    fn svg_icon_multi_hole_duplicate_closing_vertex_and_viewbox_support() {
+        // 1. Official Google Material Symbols Sharp "chat" normalized to 0..24 with 3 stacked rectangular holes
+        // (two holes share rightmost x = 18) and explicit closing L x0 y0 Z segments.
+        const CHAT: &str = "M2 22 L2 2 L22 2 L22 18 L6 18 L2 22 Z M6 14 L14 14 L14 12 L6 12 L6 14 Z M6 11 L18 11 L18 9 L6 9 L6 11 Z M6 8 L18 8 L18 6 L6 6 L6 8 Z";
+        let mut c = super::Canvas2D::new([0.0, 0.0]);
+        c.svg_icon_path(CHAT, 24.0, Color::WHITE);
+        let tris: Vec<([f32; 2], [f32; 2], [f32; 2])> = c
+            .cmds
+            .iter()
+            .filter_map(|cmd| match cmd {
+                super::Canvas2DCmd::Tri { p0, p1, p2, .. } => Some((*p0, *p1, *p2)),
+                _ => None,
+            })
+            .collect();
+        assert!(!tris.is_empty(), "expected triangulated CHAT triangles");
+        let tri_covers = |pt: [f32; 2], (a, b, d): ([f32; 2], [f32; 2], [f32; 2])| {
+            let (ta, tb, tc) = if super::cross2d(a, b, d) >= 0.0 {
+                (a, b, d)
+            } else {
+                (a, d, b)
+            };
+            super::point_in_tri(pt, ta, tb, tc)
+        };
+        let total_area: f32 = tris
+            .iter()
+            .map(|&(a, b, d)| super::cross2d(a, b, d).abs() * 0.5)
+            .sum();
+        // Outer chat bubble area: 20x16 box (320) + bottom-left tail triangle 4x4/2 (8) = 328.
+        // Minus 3 cutout bars: 8x2 (16) + 12x2 (24) + 12x2 (24) = 64 -> exact net area = 264.0.
+        assert!(
+            (total_area - 264.0).abs() < 0.5,
+            "CHAT net triangulated area must equal 264.0 without overlapping or missing triangles, got {total_area}"
+        );
+        // All 3 cutout bar interiors must remain hollow:
+        for hole_pt in [[10.0, 13.0], [12.0, 10.0], [12.0, 7.0]] {
+            assert!(
+                !tris.iter().any(|&t| tri_covers(hole_pt, t)),
+                "CHAT hole interior {hole_pt:?} must remain hollow"
+            );
+        }
+        // Solid bubble areas around and between the bars must be filled:
+        for solid_pt in [
+            [4.0, 10.0],
+            [20.0, 10.0],
+            [12.0, 4.0],
+            [12.0, 8.5],
+            [12.0, 11.5],
+            [12.0, 16.0],
+        ] {
+            assert!(
+                tris.iter().any(|&t| tri_covers(solid_pt, t)),
+                "CHAT bubble solid point {solid_pt:?} must be covered"
+            );
+        }
+
+        // 2. Unconverted Material Symbols `0 -960 960 960` path (and `<svg viewBox="0 -960 960 960">`)
+        const CHAT_960: &str = "M80-80v-800h800v640H240L80-80Zm160-320h320v-80H240v80Zm0-120h480v-80H240v80Zm0-120h480v-80H240v80Z";
+        let mut c960 = super::Canvas2D::new([0.0, 0.0]);
+        c960.svg_icon_path(CHAT_960, 24.0, Color::WHITE);
+        let area_960: f32 = c960
+            .cmds
+            .iter()
+            .filter_map(|cmd| match cmd {
+                super::Canvas2DCmd::Tri { p0, p1, p2, .. } => {
+                    Some(super::cross2d(*p0, *p1, *p2).abs() * 0.5)
+                }
+                _ => None,
+            })
+            .sum();
+        assert!(
+            (area_960 - 264.0).abs() < 0.5,
+            "0 -960 960 960 Material path must auto-normalize to 24x24 with net area 264.0, got {area_960}"
+        );
+
+        let svg_xml = format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960"><path d="{CHAT_960}"/></svg>"#
+        );
+        let mut c_xml = super::Canvas2D::new([0.0, 0.0]);
+        c_xml.svg_icon_path(&svg_xml, 24.0, Color::WHITE);
+        let area_xml: f32 = c_xml
+            .cmds
+            .iter()
+            .filter_map(|cmd| match cmd {
+                super::Canvas2DCmd::Tri { p0, p1, p2, .. } => {
+                    Some(super::cross2d(*p0, *p1, *p2).abs() * 0.5)
+                }
+                _ => None,
+            })
+            .sum();
+        assert!((area_xml - 264.0).abs() < 0.5);
     }
 }

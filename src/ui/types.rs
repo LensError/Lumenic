@@ -720,6 +720,12 @@ impl WindowConfig {
         self
     }
 
+    /// Bundles a custom TTF/OTF/TTC font using its embedded OpenType family names.
+    pub fn font_bytes(mut self, bytes: impl Into<Vec<u8>>) -> Self {
+        self.fonts.push((String::new(), bytes.into()));
+        self
+    }
+
     /// Bundles a single TTF/OTF/TTC face under `name` and sets it as the global default UI sans-serif font.
     ///
     /// On `wasm32`, system fonts are unavailable and only the embedded `LumenicSans` regular face is loaded

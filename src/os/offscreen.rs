@@ -132,6 +132,18 @@ impl OffscreenSurface {
         self.dirty = true;
     }
 
+    /// Registers raw TTF/OTF/TTC font bytes into the shared font database using the font's embedded OpenType family names.
+    pub fn register_font_bytes(&mut self, bytes: &[u8]) {
+        crate::gfx::text::register_font_bytes(bytes);
+        self.dirty = true;
+    }
+
+    /// Registers raw TTF/OTF/TTC font bytes into the shared font database under `name`.
+    pub fn register_font(&mut self, name: &str, bytes: &[u8]) {
+        crate::gfx::text::register_font(name, bytes);
+        self.dirty = true;
+    }
+
     /// Returns `true` if this surface has pending changes or active animations that require rendering.
     pub fn needs_render(&self) -> bool {
         self.dirty
@@ -185,6 +197,22 @@ impl OffscreenHost {
             gl_ctx,
             _not_send_sync: PhantomData,
         })
+    }
+
+    /// Registers raw TTF/OTF/TTC font bytes into the host's font database using the font's embedded OpenType family names.
+    pub fn register_font_bytes(&mut self, bytes: &[u8]) {
+        crate::gfx::text::register_font_bytes(bytes);
+        for surf in self.surfaces.values_mut() {
+            surf.dirty = true;
+        }
+    }
+
+    /// Registers raw TTF/OTF/TTC font bytes into the host's font database under `name`.
+    pub fn register_font(&mut self, name: &str, bytes: &[u8]) {
+        crate::gfx::text::register_font(name, bytes);
+        for surf in self.surfaces.values_mut() {
+            surf.dirty = true;
+        }
     }
 
     /// Creates a new independent offscreen UI surface with its own FBO, `UiContext`, and `App`.

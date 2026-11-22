@@ -76,7 +76,9 @@ pub use gfx::image::{
     decode_gif_frames, decode_icon, decode_image, decode_png, encode_png, GifFrame, RgbaImage,
 };
 pub use gfx::inspect::{inspect_to_files, InspectOptions};
-pub use gfx::text::{register_font, set_default_font_family, set_default_mono_font_family};
+pub use gfx::text::{
+    register_font, register_font_bytes, set_default_font_family, set_default_mono_font_family,
+};
 #[cfg(feature = "gltf")]
 pub use gfx::viewport::LoadedGltf;
 pub use gfx::viewport::{

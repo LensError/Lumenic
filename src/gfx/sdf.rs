@@ -1073,14 +1073,18 @@ float sd_rounded_box4(vec2 p, vec2 half_sz, vec4 r4) {
     return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
 }
 
-float sd_bevel_box4(vec2 p, vec2 half_sz, vec4 b4) {
+float sd_bevel_box4(vec2 p, vec2 half_sz, vec4 b4, float fillet) {
     b4.xy = (p.x > 0.0) ? b4.yz : b4.xw;
     float b = (p.y > 0.0) ? b4.y : b4.x;
+    float min_h = min(half_sz.x, half_sz.y);
+    float f = clamp(fillet, 0.0, min_h);
     vec2 pa = abs(p);
-    vec2 d_v = pa - half_sz;
+    vec2 hs = max(half_sz - vec2(f), vec2(0.0));
+    float b_eff = clamp(b - f * 0.58578644, 0.0, min(hs.x, hs.y));
+    vec2 d_v = pa - hs;
     float d_box = length(max(d_v, 0.0)) + min(max(d_v.x, d_v.y), 0.0);
-    float d_chamfer = (pa.x + pa.y - (half_sz.x + half_sz.y - b)) * 0.70710678;
-    return max(d_box, d_chamfer);
+    float d_chamfer = (pa.x + pa.y - (hs.x + hs.y - b_eff)) * 0.70710678;
+    return max(d_box, d_chamfer) - f;
 }
 
 // Regular flat-top hexagon centered at origin with inradius (apothem) `r`.
@@ -1185,13 +1189,16 @@ void main() {
 
     float d;
     if (sub_shape == 10) {
-        d = sd_bevel_box4(p, half_sz, r4) * sc;
+        float fillet = (dot(v_corners, vec4(1.0)) > 0.0) ? clamp(v_params.x, 0.0, min_half) : 0.0;
+        d = sd_bevel_box4(p, half_sz, r4, fillet) * sc;
     } else if (sub_shape == 11) {
         float hex_r = min(half_sz.y, half_sz.x * 0.866025404);
-        d = sd_hexagon(p, hex_r) * sc;
+        float vr = clamp(v_params.x, 0.0, max(hex_r - 0.5, 0.0));
+        d = (sd_hexagon(p, max(hex_r - vr, 0.0)) - vr) * sc;
     } else if (sub_shape == 12) {
         float hex_r = min(half_sz.x, half_sz.y * 0.866025404);
-        d = sd_hexagon(p.yx, hex_r) * sc;
+        float vr = clamp(v_params.x, 0.0, max(hex_r - 0.5, 0.0));
+        d = (sd_hexagon(p.yx, max(hex_r - vr, 0.0)) - vr) * sc;
     } else {
         d = sd_rounded_box4(p, half_sz, r4) * sc;
     }

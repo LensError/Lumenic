@@ -17,13 +17,18 @@ static DEFAULT_MONO_FAMILY: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
 /// Registers raw TTF/OTF/TTC font bytes globally under `name` for all existing and future windows.
 pub fn register_font(name: &str, bytes: &[u8]) {
-    if name.is_empty() || bytes.is_empty() {
+    if bytes.is_empty() {
         return;
     }
     let reg = REGISTERED_FONTS.get_or_init(|| Mutex::new(Vec::new()));
     if let Ok(mut list) = reg.lock() {
-        list.push((String::from(name), Arc::new(bytes.to_vec())));
+        list.push((String::from(name.trim()), Arc::new(bytes.to_vec())));
     }
+}
+
+/// Registers raw TTF/OTF/TTC font bytes globally using the font's embedded OpenType family names.
+pub fn register_font_bytes(bytes: &[u8]) {
+    register_font("", bytes);
 }
 
 /// Sets the global default sans-serif UI font family (system name or registered font alias).
@@ -263,10 +268,22 @@ impl GlyphAtlas {
                     for (alias, bytes) in pending {
                         let before = db.faces().count();
                         db.load_font_source(cosmic_text::fontdb::Source::Binary(bytes));
-                        if let Some(face) = db.faces().nth(before) {
-                            if let Some((actual_name, _)) = face.families.first() {
+                        let mut first_actual: Option<String> = None;
+                        for face in db.faces().skip(before) {
+                            for (actual_name, _) in &face.families {
+                                if first_actual.is_none() {
+                                    first_actual = Some(actual_name.clone());
+                                }
+                                self.font_aliases.insert(
+                                    actual_name.to_ascii_lowercase(),
+                                    actual_name.clone(),
+                                );
+                            }
+                        }
+                        if !alias.is_empty() {
+                            if let Some(actual_name) = first_actual {
                                 self.font_aliases
-                                    .insert(alias.to_ascii_lowercase(), actual_name.clone());
+                                    .insert(alias.to_ascii_lowercase(), actual_name);
                             }
                         }
                     }
@@ -1635,6 +1652,27 @@ mod tests {
         );
         assert!(atlas.font_aliases.contains_key("customtestfont"));
         assert!(!out.glyphs.is_empty());
+
+        // Also verify `register_font_bytes(&[u8])` registers the embedded OpenType family name ("LumenicSans").
+        super::register_font_bytes(FALLBACK_FONT_BYTES);
+        let mut atlas2 = GlyphAtlas::new_fallback_only();
+        let out2 = atlas2.shape_plain_formatted_to_quads(
+            "Embedded Family Name",
+            Rect::new(0.0, 0.0, 240.0, 40.0),
+            1.0,
+            Color::WHITE,
+            16.0,
+            400,
+            false,
+            Some("LumenicSans"),
+            false,
+            false,
+            crate::ui::types::TextAlign::Left,
+            0.0,
+            1.35,
+        );
+        assert!(atlas2.font_aliases.contains_key("lumenicsans"));
+        assert!(!out2.glyphs.is_empty());
     }
 
     #[test]

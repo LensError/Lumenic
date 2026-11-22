@@ -166,9 +166,9 @@ pub enum DrawCmd {
         border_color: Color,
         /// Optional linear border gradient.
         bd_grad: Option<Gradient>,
-        /// Corner rounding radius in logical points.
+        /// Corner rounding radius in logical points (or fillet radius when `shape == RectShape::Bevel`).
         radius: f32,
-        /// Independent corner radii `[tl, tr, br, bl]` in logical points (used when `corner_radii` is set or `[radius; 4]`).
+        /// Independent corner radii `[tl, tr, br, bl]` in logical points (or chamfer sizes when `shape == RectShape::Bevel`).
         corner_radii: [f32; 4],
         /// Drop-shadow Gaussian blur radius in logical points.
         shadow_blur: f32,

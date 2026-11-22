@@ -605,9 +605,10 @@ impl UiContext {
         self.table(id_label, columns, state, row_count, cell_fn)
     }
 
-    /// Vector icon decoded from an SVG path `d` string at `size x size` pixels.
+    /// Vector icon decoded from an SVG path `d` string or `<svg viewBox="...">` markup at `size x size` pixels.
     ///
-    /// Supports `.fg(color)` to tint the vector strokes and fills.
+    /// Automatically supports `0..24` icons, `<svg viewBox="...">` strings, and Google Material Symbols
+    /// `0 -960 960 960` paths. Supports `.fg(color)` to tint the vector strokes and fills.
     pub fn svg_icon(&mut self, d: &str, size: f32) -> StyleBuilder<'_> {
         let ordinal = self
             .container_stack
@@ -620,6 +621,49 @@ impl UiContext {
         let sz = size.max(4.0);
         let mut c = Canvas2D::new([0.0, 0.0]);
         c.svg_icon_path(d, sz, self.theme.text);
+
+        let mut node = LayoutNode::new_leaf(id, Role::Container, String::from("SvgIcon"));
+        node.style = Style {
+            width: Some(sz),
+            height: Some(sz),
+            svg_fg_tint: true,
+            ..Style::default()
+        };
+        node.viewport_data = Some((
+            c.cmds,
+            SceneSnapshot {
+                camera: Camera3D::default(),
+                draws: Vec::new(),
+                msaa_samples: 4,
+            },
+        ));
+        node.intrinsic_w = sz;
+        node.intrinsic_h = sz;
+        node.content_w = sz;
+        node.content_h = sz;
+        let idx = self.alloc_node(node, true);
+        StyleBuilder {
+            ui: self,
+            node_idx: idx,
+            changed: false,
+        }
+    }
+
+    /// Vector icon decoded from an SVG path `d` string with an explicit `viewbox` (`[min_x, min_y, width, height]`) at `size x size` pixels.
+    ///
+    /// Supports `.fg(color)` to tint the vector strokes and fills.
+    pub fn svg_icon_viewbox(&mut self, d: &str, viewbox: [f32; 4], size: f32) -> StyleBuilder<'_> {
+        let ordinal = self
+            .container_stack
+            .last()
+            .map_or(0, |&p| self.nodes[p].children.len());
+        self.ids.push_u64(ordinal as u64);
+        let id = self.ids.id("__svg_icon__");
+        self.ids.pop_id();
+
+        let sz = size.max(4.0);
+        let mut c = Canvas2D::new([0.0, 0.0]);
+        c.svg_icon_path_viewbox(d, viewbox, sz, self.theme.text);
 
         let mut node = LayoutNode::new_leaf(id, Role::Container, String::from("SvgIcon"));
         node.style = Style {

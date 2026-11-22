@@ -295,6 +295,18 @@ impl App {
         spawn_pick_folder(title, self.waker.clone())
     }
 
+    /// Registers raw TTF/OTF/TTC font bytes globally using the font's embedded OpenType family names.
+    pub fn register_font_bytes(&mut self, bytes: &[u8]) {
+        crate::gfx::text::register_font_bytes(bytes);
+        self.redraw_requested = true;
+    }
+
+    /// Registers raw TTF/OTF/TTC font bytes globally under `name` (in addition to its embedded OpenType family names).
+    pub fn register_font(&mut self, name: &str, bytes: &[u8]) {
+        crate::gfx::text::register_font(name, bytes);
+        self.redraw_requested = true;
+    }
+
     /// Applies an action returned by `UiContext::csd_titlebar`.
     pub fn perform_csd(&mut self, action: CsdAction) {
         match action {

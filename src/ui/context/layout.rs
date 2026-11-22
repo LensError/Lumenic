@@ -1024,8 +1024,27 @@ impl UiContext {
         } else {
             (node.style.border_width, node.style.border_color)
         };
-        let draw_radius = node.style.radius;
-        let resolved_corners = node.style.corner_radii.unwrap_or([draw_radius; 4]);
+        let resolved_corners = node.style.corner_radii.unwrap_or([node.style.radius; 4]);
+        let draw_radius = if node.style.shape == RectShape::Bevel {
+            if node.style.corner_fillet > 0.0 {
+                node.style.corner_fillet
+            } else if node.style.corner_radii.is_some()
+                && node.style.radius > 0.0
+                && node.style.corner_radii != Some([node.style.radius; 4])
+            {
+                node.style.radius
+            } else {
+                0.0
+            }
+        } else if matches!(
+            node.style.shape,
+            RectShape::Hexagon | RectShape::HexagonPointy
+        ) && node.style.corner_fillet > 0.0
+        {
+            node.style.corner_fillet
+        } else {
+            node.style.radius
+        };
 
         let eff_opacity = node.style.opacity.clamp(0.0, 1.0);
         let mul_alpha = |c: Color| -> Color {

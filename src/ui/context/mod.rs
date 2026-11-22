@@ -243,6 +243,7 @@ pub(crate) struct Style {
     pub translate: [f32; 2],
     pub svg_fg_tint: bool,
     pub font_family: Option<String>,
+    pub corner_fillet: f32,
 }
 
 impl Default for Style {
@@ -339,6 +340,7 @@ impl Default for Style {
             translate: [0.0, 0.0],
             svg_fg_tint: false,
             font_family: None,
+            corner_fillet: 0.0,
         }
     }
 }
@@ -883,6 +885,18 @@ impl UiContext {
 
     /// Marks the UI dirty so the next idle cycle schedules a redraw.
     pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Registers raw TTF/OTF/TTC font bytes globally using the font's embedded OpenType family names.
+    pub fn register_font_bytes(&mut self, bytes: &[u8]) {
+        crate::gfx::text::register_font_bytes(bytes);
+        self.dirty = true;
+    }
+
+    /// Registers raw TTF/OTF/TTC font bytes globally under `name` (in addition to its embedded OpenType family names).
+    pub fn register_font(&mut self, name: &str, bytes: &[u8]) {
+        crate::gfx::text::register_font(name, bytes);
         self.dirty = true;
     }
 

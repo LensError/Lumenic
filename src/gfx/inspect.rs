@@ -378,17 +378,28 @@ fn rasterize_instance(
                 _ => corner_r.clamp(0.0, min_half),
             };
             let d = if sub_shape == 10 {
+                let fillet = if has_corners {
+                    inst.radii_and_border[0].clamp(0.0, min_half)
+                } else {
+                    0.0
+                };
+                let hs_x = (hx - fillet).max(0.0);
+                let hs_y = (hy - fillet).max(0.0);
+                let b_eff = (r - fillet * 0.585_786_44).clamp(0.0, hs_x.min(hs_y));
                 let pa_x = px_local.abs();
                 let pa_y = py_local.abs();
-                let d_box = sd_rounded_box(px_local, py_local, hx, hy, 0.0);
-                let d_chamfer = (pa_x + pa_y - (hx + hy - r)) * core::f32::consts::FRAC_1_SQRT_2;
-                d_box.max(d_chamfer) * sc
+                let d_box = sd_rounded_box(px_local, py_local, hs_x, hs_y, 0.0);
+                let d_chamfer =
+                    (pa_x + pa_y - (hs_x + hs_y - b_eff)) * core::f32::consts::FRAC_1_SQRT_2;
+                (d_box.max(d_chamfer) - fillet) * sc
             } else if sub_shape == 11 {
                 let hex_r = hy.min(hx * 0.866_025_4);
-                sd_hexagon(px_local, py_local, hex_r) * sc
+                let vr = inst.radii_and_border[0].clamp(0.0, (hex_r - 0.5).max(0.0));
+                (sd_hexagon(px_local, py_local, (hex_r - vr).max(0.0)) - vr) * sc
             } else if sub_shape == 12 {
                 let hex_r = hx.min(hy * 0.866_025_4);
-                sd_hexagon(py_local, px_local, hex_r) * sc
+                let vr = inst.radii_and_border[0].clamp(0.0, (hex_r - 0.5).max(0.0));
+                (sd_hexagon(py_local, px_local, (hex_r - vr).max(0.0)) - vr) * sc
             } else {
                 sd_rounded_box(px_local, py_local, hx, hy, r) * sc
             };
@@ -1312,6 +1323,69 @@ mod tests {
             prev_r = cur;
         }
         assert_eq!(sample_r(163), 255);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hexagon_fillet_and_bevel_rounded_rasterize_cleanly() {
+        let dir = std::env::temp_dir().join("lumenic_inspect_fillet_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let opts = InspectOptions {
+            width: 220,
+            height: 70,
+            scale_factor: 1.0,
+            out_png: dir.join("fillet.png"),
+            out_json: dir.join("fillet.json"),
+        };
+
+        inspect_to_files(&opts, |ui, _app| {
+            ui.row(|ui| {
+                ui.col(|_| {})
+                    .w(48.0)
+                    .h(48.0)
+                    .bg(Color::from_hex(0xEF4444))
+                    .hexagon_pointy()
+                    .r(6.0);
+                ui.col(|_| {})
+                    .w(60.0)
+                    .h(48.0)
+                    .bg(Color::from_hex(0x3B82F6))
+                    .bevel_rounded(10.0, 3.0);
+                ui.col(|_| {})
+                    .w(60.0)
+                    .h(48.0)
+                    .bg(Color::from_hex(0x22C55E))
+                    .bevel(10.0)
+                    .r(3.0);
+            })
+            .p(10.0)
+            .gap(12.0);
+        })
+        .expect("inspect fillet succeeds");
+
+        let png_bytes = std::fs::read(&opts.out_png).expect("png exists");
+        let img = decode_png(&png_bytes).expect("valid png");
+
+        // Pointy-top hexagon with .r(6.0) at [10..58, 10..58]: center (34, 34) is solid red,
+        // sharp top tip (34, 10) is rounded away by inset fillet r=6.0.
+        let hex_center = (34 * 220 + 34) * 4;
+        let hex_top_tip = (10 * 220 + 34) * 4;
+        assert!(img.data[hex_center] > 180);
+        assert!(img.data[hex_top_tip] < 80);
+
+        // Bevel rounded card at [70..130, 10..58]: center (100, 34) is solid blue,
+        // top-left corner (70, 10) is cut by chamfer, and the sharp chamfer joint at (80, 10) is softened by fillet.
+        let bev_center = (34 * 220 + 100) * 4;
+        let bev_tl = (10 * 220 + 70) * 4;
+        assert!(img.data[bev_center + 2] > 180);
+        assert!(img.data[bev_tl + 2] < 80);
+
+        // `.bevel(10.0).r(3.0)` card at [142..202, 10..58]: center (172, 34) is solid green, top-left (142, 10) is cut.
+        let bev2_center = (34 * 220 + 172) * 4;
+        let bev2_tl = (10 * 220 + 142) * 4;
+        assert!(img.data[bev2_center + 1] > 180);
+        assert!(img.data[bev2_tl + 1] < 80);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

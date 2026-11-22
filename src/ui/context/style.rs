@@ -311,10 +311,22 @@ macro_rules! impl_style_methods {
                 self
             }
 
-            /// Sets a named font family registered via [`crate::register_font`], `WindowConfig::font`, or a system family name.
+            /// Sets a named font family registered via [`crate::register_font`], [`crate::register_font_bytes`], `WindowConfig::font`, or a system family name.
             pub fn font(self, family: impl Into<String>) -> Self {
-                self.ui.nodes[self.node_idx].style.font_family = Some(family.into());
+                let fam = family.into();
+                self.ui.nodes[self.node_idx].style.font_family = Some(fam.clone());
+                for i in 0..self.ui.nodes[self.node_idx].children.len() {
+                    let cid = self.ui.nodes[self.node_idx].children[i];
+                    if self.ui.nodes[cid].role == Role::Label {
+                        self.ui.nodes[cid].style.font_family = Some(fam.clone());
+                    }
+                }
                 self
+            }
+
+            /// Alias for [`Self::font`]: sets a named font family on this node and its label children.
+            pub fn font_family(self, family: impl Into<String>) -> Self {
+                self.font(family)
             }
 
             /// Sets letter spacing (tracking) in `em` units (e.g. `-0.03` or `0.06`).
@@ -556,8 +568,20 @@ macro_rules! impl_style_methods {
             pub fn bevel(self, size: f32) -> Self {
                 let s = &mut self.ui.nodes[self.node_idx].style;
                 s.shape = RectShape::Bevel;
-                s.radius = size.max(0.0);
-                s.corner_radii = None;
+                let sz = size.max(0.0);
+                s.radius = sz;
+                s.corner_radii = Some([sz; 4]);
+                self
+            }
+
+            /// Renders this node's SDF background/border with 45-degree beveled corners of `size` logical points and vertex fillet rounding `fillet_r`.
+            pub fn bevel_rounded(self, size: f32, fillet_r: f32) -> Self {
+                let s = &mut self.ui.nodes[self.node_idx].style;
+                s.shape = RectShape::Bevel;
+                let sz = size.max(0.0);
+                s.radius = sz;
+                s.corner_radii = Some([sz; 4]);
+                s.corner_fillet = fillet_r.max(0.0);
                 self
             }
 
@@ -570,13 +594,50 @@ macro_rules! impl_style_methods {
                 self
             }
 
+            /// Renders this node's SDF background/border with independent 45-degree beveled corners `[tl, tr, br, bl]` and vertex fillet rounding `fillet_r`.
+            pub fn bevel_corners_rounded(
+                self,
+                tl: f32,
+                tr: f32,
+                br: f32,
+                bl: f32,
+                fillet_r: f32,
+            ) -> Self {
+                let s = &mut self.ui.nodes[self.node_idx].style;
+                s.shape = RectShape::Bevel;
+                s.radius = tl.max(tr).max(br).max(bl).max(0.0);
+                s.corner_radii = Some([tl.max(0.0), tr.max(0.0), br.max(0.0), bl.max(0.0)]);
+                s.corner_fillet = fillet_r.max(0.0);
+                self
+            }
+
+            /// Sets the vertex fillet rounding radius in logical points on `.bevel(...)`, `.bevel_corners(...)`, `.hexagon()`, or `.hexagon_pointy()` shapes.
+            pub fn fillet(self, fillet_r: f32) -> Self {
+                let r = fillet_r.max(0.0);
+                let s = &mut self.ui.nodes[self.node_idx].style;
+                s.corner_fillet = r;
+                if matches!(s.shape, RectShape::Hexagon | RectShape::HexagonPointy) {
+                    s.radius = r;
+                }
+                self
+            }
+
+            /// Alias for [`Self::fillet`]: sets the vertex fillet rounding radius in logical points.
+            pub fn corner_round(self, fillet_r: f32) -> Self {
+                self.fillet(fillet_r)
+            }
+
             /// Renders this node's SDF background, border, shadow, and image clip mask as a regular flat-top hexagon.
+            ///
+            /// Chain `.r(vertex_radius)` or `.fillet(vertex_radius)` to round the hexagon's 6 vertices.
             pub fn hexagon(self) -> Self {
                 self.ui.nodes[self.node_idx].style.shape = RectShape::Hexagon;
                 self
             }
 
             /// Renders this node's SDF background, border, shadow, and image clip mask as a regular pointy-top hexagon.
+            ///
+            /// Chain `.r(vertex_radius)` or `.fillet(vertex_radius)` to round the hexagon's 6 vertices.
             pub fn hexagon_pointy(self) -> Self {
                 self.ui.nodes[self.node_idx].style.shape = RectShape::HexagonPointy;
                 self
