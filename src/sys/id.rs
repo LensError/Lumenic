@@ -78,6 +78,11 @@ impl IdStack {
         WidgetId(fnv1a_bytes(self.current_seed(), label.as_bytes()))
     }
 
+    /// Derives a deterministic `WidgetId` from the root FNV-1a seed and `label` (ignoring pushed scopes).
+    pub fn root_id(&self, label: &str) -> WidgetId {
+        WidgetId(fnv1a_bytes(FNV_OFFSET_BASIS, label.as_bytes()))
+    }
+
     /// Registers an interactive `WidgetId` for the current frame.
     ///
     /// Returns `false` and records the ID in `collisions()` if already seen this frame.

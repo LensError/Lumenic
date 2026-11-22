@@ -317,11 +317,22 @@ impl UiContext {
             }
         };
 
+        let mut content_w = content_w;
         if self.nodes[idx].is_scroll {
             if self.nodes[idx].role == Role::Modal {
                 let top_inset = if self.has_csd_titlebar { 40.0 } else { 0.0 };
                 let max_modal_h = (self.viewport_h - top_inset - 32.0 - pad_y).max(80.0);
                 content_h = content_h.min(max_modal_h);
+            } else if self.nodes[idx].kind == AxisKind::Row {
+                if explicit_w.is_none() && self.nodes[idx].style.max_w.is_none() {
+                    if self.nodes[idx].style.grow > 0.0 {
+                        content_w = 0.0;
+                    } else if let Some(aw) = inner_avail_w {
+                        content_w = content_w.min(aw);
+                    } else {
+                        content_w = content_w.min(self.viewport_w.max(180.0));
+                    }
+                }
             } else if explicit_h.is_none()
                 && self.nodes[idx].style.max_h.is_none()
                 && self.nodes[idx].style.grow <= 0.0
@@ -395,7 +406,6 @@ impl UiContext {
         let kind = self.nodes[idx].kind;
         let is_scroll = self.nodes[idx].is_scroll;
         let scroll_id = self.nodes[idx].id;
-        let scroll_offset_y = self.nodes[idx].scroll_offset_y;
         let children = core::mem::take(&mut self.nodes[idx].children);
         if children.is_empty() {
             self.nodes[idx].children = children;
@@ -500,10 +510,8 @@ impl UiContext {
                         sc.inner_w = inner_w;
                         sc.target_x = sc.target_x.clamp(0.0, max_x);
                         sc.spring_x.target = sc.target_x;
-                        if sc.spring_x.value > max_x {
-                            sc.spring_x.value = max_x;
-                        }
-                        scroll_offset_y.clamp(0.0, max_x)
+                        sc.spring_x.value = sc.spring_x.value.clamp(0.0, max_x);
+                        sc.spring_x.value
                     } else {
                         0.0
                     };
@@ -635,10 +643,8 @@ impl UiContext {
                     } else {
                         sc.target_y = sc.target_y.clamp(0.0, max_y);
                         sc.spring.target = sc.target_y;
-                        if sc.spring.value > max_y {
-                            sc.spring.value = max_y;
-                        }
-                        scroll_offset_y.clamp(0.0, max_y)
+                        sc.spring.value = sc.spring.value.clamp(0.0, max_y);
+                        sc.spring.value
                     }
                 } else {
                     0.0

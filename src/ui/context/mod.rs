@@ -530,6 +530,7 @@ pub struct UiContext {
     flips: HashMap<WidgetId, FlipState>,
     ripples: Vec<RippleEffect>,
     pub(crate) scroll_states: HashMap<WidgetId, ScrollState>,
+    scroll_label_ids: HashMap<String, WidgetId>,
     pending_scroll_to_bottom: HashSet<WidgetId>,
     pending_scrollbar_rects: HashMap<WidgetId, (Rect, Rect)>,
     pub(crate) prev_scrollbar_rects: HashMap<WidgetId, (Rect, Rect)>,
@@ -643,6 +644,7 @@ impl UiContext {
             flips: HashMap::new(),
             ripples: Vec::new(),
             scroll_states: HashMap::new(),
+            scroll_label_ids: HashMap::new(),
             pending_scroll_to_bottom: HashSet::new(),
             pending_scrollbar_rects: HashMap::new(),
             prev_scrollbar_rects: HashMap::new(),
@@ -771,7 +773,8 @@ impl UiContext {
 
     /// Returns the laid-out `Rect` of the scoped `label` from the last completed frame, if present.
     pub fn prev_rect_by_label(&self, label: &str) -> Option<Rect> {
-        self.prev_rects.get(&self.ids.id(label)).copied()
+        let id = self.resolve_scroll_id(label);
+        self.prev_rects.get(&id).copied()
     }
 
     /// Returns the per-frame bump arena for transient allocations.
@@ -1319,6 +1322,9 @@ impl UiContext {
 
         if self.scroll_states.len() > 256 {
             self.scroll_states.retain(|id, _| is_live(id, 1800));
+            let live_scrolls = &self.scroll_states;
+            self.scroll_label_ids
+                .retain(|_, id| live_scrolls.contains_key(id));
         }
         if self.widget_text_states.len() > 256 {
             self.widget_text_states.retain(|id, _| is_live(id, 1800));
@@ -1599,9 +1605,74 @@ impl UiContext {
         self.build_container(AxisKind::Col, "overlay", None, true, f)
     }
 
+    fn resolve_scroll_id(&self, id_label: &str) -> WidgetId {
+        let scoped = self.ids.id(id_label);
+        if self.scroll_states.contains_key(&scoped)
+            || self.prev_rects.contains_key(&scoped)
+            || self.prev_scrollbar_rects.contains_key(&scoped)
+        {
+            scoped
+        } else {
+            self.scroll_label_ids
+                .get(id_label)
+                .copied()
+                .unwrap_or(scoped)
+        }
+    }
+
+    fn bind_scroll_label(&mut self, id_label: &str, scoped_id: WidgetId) {
+        if let Some(prev_id) = self.scroll_label_ids.insert(String::from(id_label), scoped_id) {
+            if prev_id != scoped_id {
+                if !self.scroll_states.contains_key(&scoped_id) {
+                    if let Some(st) = self.scroll_states.remove(&prev_id) {
+                        self.scroll_states.insert(scoped_id, st);
+                    }
+                } else if let Some(prev_st) = self.scroll_states.get(&prev_id).copied() {
+                    if let Some(cur_st) = self.scroll_states.get_mut(&scoped_id) {
+                        if prev_st.target_x != 0.0 && cur_st.target_x == 0.0 {
+                            cur_st.target_x = prev_st.target_x;
+                            cur_st.spring_x = prev_st.spring_x;
+                        }
+                        if prev_st.target_y != 0.0 && cur_st.target_y == 0.0 {
+                            cur_st.target_y = prev_st.target_y;
+                            cur_st.spring = prev_st.spring;
+                        }
+                    }
+                    self.scroll_states.remove(&prev_id);
+                }
+                if self.pending_scroll_to_bottom.remove(&prev_id) {
+                    self.pending_scroll_to_bottom.insert(scoped_id);
+                }
+            }
+        }
+        let unenscoped = WidgetId(self.ids.root_id(id_label).0);
+        if unenscoped != scoped_id {
+            if !self.scroll_states.contains_key(&scoped_id) {
+                if let Some(st) = self.scroll_states.remove(&unenscoped) {
+                    self.scroll_states.insert(scoped_id, st);
+                }
+            } else if let Some(un_st) = self.scroll_states.remove(&unenscoped) {
+                if let Some(cur_st) = self.scroll_states.get_mut(&scoped_id) {
+                    if un_st.target_x != 0.0 {
+                        cur_st.target_x = un_st.target_x;
+                        cur_st.spring_x = un_st.spring_x;
+                    }
+                    if un_st.target_y != 0.0 {
+                        cur_st.target_y = un_st.target_y;
+                        cur_st.spring = un_st.spring;
+                    }
+                }
+            }
+            if self.pending_scroll_to_bottom.remove(&unenscoped) {
+                self.pending_scroll_to_bottom.insert(scoped_id);
+            }
+        }
+    }
+
     /// Spring-damped vertically scrollable clipped container with interactive draggable scrollbar.
     pub fn scroll<F: FnOnce(&mut UiContext)>(&mut self, id_label: &str, f: F) -> StyleBuilder<'_> {
         let id = self.ids.id(id_label);
+        self.bind_scroll_label(id_label, id);
         let sb_id = scrollbar_widget_id(id);
         let prev_rect = self.prev_rects.get(&id).copied();
         let prev_sb = self.prev_scrollbar_rects.get(&id).copied();
@@ -1659,6 +1730,7 @@ impl UiContext {
     /// Horizontally scrollable `Row` container with smooth spring scrolling, clipping, and draggable scrollbar.
     pub fn hscroll(&mut self, id_label: &str, f: impl FnOnce(&mut UiContext)) -> StyleBuilder<'_> {
         let id = self.ids.id(id_label);
+        self.bind_scroll_label(id_label, id);
         let sb_id = scrollbar_widget_id(id);
         let prev_rect = self.prev_rects.get(&id).copied();
         let prev_sb = self.prev_scrollbar_rects.get(&id).copied();
@@ -1721,25 +1793,25 @@ impl UiContext {
 
     /// Returns the previous frame's scrollbar track `Rect` for `id_label`, if visible.
     pub fn scrollbar_rect(&self, id_label: &str) -> Option<Rect> {
-        let id = self.ids.id(id_label);
+        let id = self.resolve_scroll_id(id_label);
         self.prev_scrollbar_rects.get(&id).map(|(track, _)| *track)
     }
 
     /// Returns the current vertical scroll target offset (in logical pixels) for `id_label`.
     pub fn scroll_offset(&self, id_label: &str) -> f32 {
-        let id = self.ids.id(id_label);
+        let id = self.resolve_scroll_id(id_label);
         self.scroll_states.get(&id).map_or(0.0, |s| s.target_y)
     }
 
     /// Returns the maximum vertical scroll offset (in logical pixels) for `id_label`.
     pub fn scroll_max_y(&self, id_label: &str) -> f32 {
-        let id = self.ids.id(id_label);
+        let id = self.resolve_scroll_id(id_label);
         self.scroll_states.get(&id).map_or(0.0, |s| s.max_y)
     }
 
     /// Programmatically scrolls `id_label` to vertical offset `y` (clamped to `[0, max_y]`).
     pub fn scroll_to(&mut self, id_label: &str, y: f32) {
-        let id = self.ids.id(id_label);
+        let id = self.resolve_scroll_id(id_label);
         let sc = self.scroll_states.entry(id).or_default();
         sc.target_y = y.clamp(0.0, sc.max_y.max(y).max(0.0));
         sc.spring.target = sc.target_y;
@@ -1750,7 +1822,7 @@ impl UiContext {
 
     /// Programmatically scrolls `id_label` to the bottom on this frame (even on first layout).
     pub fn scroll_to_bottom(&mut self, id_label: &str) {
-        let id = self.ids.id(id_label);
+        let id = self.resolve_scroll_id(id_label);
         self.pending_scroll_to_bottom.insert(id);
         let sc = self.scroll_states.entry(id).or_default();
         sc.target_y = sc.max_y;
@@ -1762,13 +1834,13 @@ impl UiContext {
 
     /// Returns the current horizontal scroll target offset (in logical pixels) for `id_label`.
     pub fn scroll_offset_x(&self, id_label: &str) -> f32 {
-        let id = self.ids.id(id_label);
+        let id = self.resolve_scroll_id(id_label);
         self.scroll_states.get(&id).map_or(0.0, |s| s.target_x)
     }
 
     /// Returns the maximum horizontal scroll offset (in logical pixels) for `id_label`.
     pub fn scroll_max_x(&self, id_label: &str) -> f32 {
-        let id = self.ids.id(id_label);
+        let id = self.resolve_scroll_id(id_label);
         self.scroll_states.get(&id).map_or(0.0, |s| s.max_x)
     }
 
@@ -1822,7 +1894,7 @@ impl UiContext {
 
     /// Programmatically scrolls `id_label` smoothly using the spring animation to `y`.
     pub fn scroll_to_smooth(&mut self, id_label: &str, y: f32) {
-        let id = self.ids.id(id_label);
+        let id = self.resolve_scroll_id(id_label);
         let sc = self.scroll_states.entry(id).or_default();
         sc.target_y = y.clamp(0.0, sc.max_y.max(y).max(0.0));
         sc.spring.target = sc.target_y;
@@ -1831,7 +1903,7 @@ impl UiContext {
 
     /// Returns `true` if `id_label` was visible inside the viewport and any enclosing scroll/clip rect on the last frame.
     pub fn in_view(&self, id_label: &str) -> bool {
-        let id = self.ids.id(id_label);
+        let id = self.resolve_scroll_id(id_label);
         self.prev_in_view.contains(&id)
     }
 
@@ -1842,7 +1914,7 @@ impl UiContext {
 
     /// Returns normalized vertical scroll progress (`0.0..=1.0`) for `id_label`.
     pub fn scroll_progress(&self, id_label: &str) -> f32 {
-        let id = self.ids.id(id_label);
+        let id = self.resolve_scroll_id(id_label);
         self.scroll_states.get(&id).map_or(0.0, |s| {
             if s.max_y > 0.5 {
                 (s.spring.value / s.max_y).clamp(0.0, 1.0)
@@ -1851,14 +1923,36 @@ impl UiContext {
             }
         })
     }
+
+    /// Returns normalized horizontal scroll progress (`0.0..=1.0`) for `id_label`.
+    pub fn scroll_progress_x(&self, id_label: &str) -> f32 {
+        let id = self.resolve_scroll_id(id_label);
+        self.scroll_states.get(&id).map_or(0.0, |s| {
+            if s.max_x > 0.5 {
+                (s.spring_x.value / s.max_x).clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        })
+    }
+
     /// Programmatically scrolls `id_label` horizontally to offset `x` (clamped to `[0, max_x]`).
     pub fn scroll_to_x(&mut self, id_label: &str, x: f32) {
-        let id = self.ids.id(id_label);
+        let id = self.resolve_scroll_id(id_label);
         let sc = self.scroll_states.entry(id).or_default();
         sc.target_x = x.clamp(0.0, sc.max_x.max(x).max(0.0));
         sc.spring_x.target = sc.target_x;
         sc.spring_x.value = sc.target_x;
         sc.spring_x.velocity = 0.0;
+        self.dirty = true;
+    }
+
+    /// Programmatically scrolls `id_label` smoothly horizontally using the spring animation to `x`.
+    pub fn scroll_to_x_smooth(&mut self, id_label: &str, x: f32) {
+        let id = self.resolve_scroll_id(id_label);
+        let sc = self.scroll_states.entry(id).or_default();
+        sc.target_x = x.clamp(0.0, sc.max_x.max(x).max(0.0));
+        sc.spring_x.target = sc.target_x;
         self.dirty = true;
     }
 
@@ -3381,5 +3475,102 @@ mod tests {
         ui.on_key_down(Key::F12, Modifiers::default());
         assert!(!ui.hud_visible());
         assert!(ui.shortcut_pressed(Key::F12));
+    }
+
+    #[test]
+    fn nested_hscroll_reports_scroll_max_x_and_pans_via_scroll_to_x_and_on_scroll() {
+        let mut ui = UiContext::new();
+
+        let render = |ui: &mut UiContext, no_sb: bool| {
+            ui.begin_frame(800.0, 800.0, 1.0);
+            ui.col(|ui| {
+                ui.row(|ui| {
+                    let hs = ui
+                        .hscroll("qm_uilib_tabs_hscroll", |ui| {
+                            for i in 0..14 {
+                                ui.btn_with(&format!("qm_tab_{i}"), |ui| {
+                                    ui.txt("Tab");
+                                })
+                                .min_w(88.0)
+                                .h(44.0);
+                            }
+                        })
+                        .min_w(0.0)
+                        .grow(1.0)
+                        .gap(6.0);
+                    if no_sb {
+                        hs.scrollbar_w(0.0).no_scrollbar();
+                    }
+                })
+                .w(756.0)
+                .h(44.0);
+            })
+            .p(22.0);
+            ui.end_frame();
+        };
+
+        // Frame 1 & 2: nested hscroll inside col + row computes scroll_max_x > 500.0 (both with and without scrollbar).
+        render(&mut ui, false);
+        render(&mut ui, true);
+
+        let max_x = ui.scroll_max_x("qm_uilib_tabs_hscroll");
+        assert!(
+            max_x > 500.0,
+            "expected positive horizontal overflow max_x, got {max_x}"
+        );
+
+        let hs_rect = ui
+            .prev_rect_by_label("qm_uilib_tabs_hscroll")
+            .expect("hscroll prev_rect_by_label");
+        assert!((hs_rect.x - 22.0).abs() < 0.5 && (hs_rect.w - 756.0).abs() < 0.5);
+
+        let b0_initial = ui
+            .semantics()
+            .iter()
+            .find(|n| n.label == "qm_tab_0")
+            .expect("qm_tab_0")
+            .bounds;
+        assert!((b0_initial.x - 22.0).abs() < 0.5);
+
+        // Programmatic scroll_to_x shifts child positions immediately on the next layout frame.
+        ui.scroll_to_x("qm_uilib_tabs_hscroll", 240.0);
+        render(&mut ui, true);
+        assert!((ui.scroll_offset_x("qm_uilib_tabs_hscroll") - 240.0).abs() < 0.5);
+        let b0_after_scroll_to = ui
+            .semantics()
+            .iter()
+            .find(|n| n.label == "qm_tab_0")
+            .expect("qm_tab_0")
+            .bounds;
+        assert!(
+            (b0_after_scroll_to.x - (22.0 - 240.0)).abs() < 1.0,
+            "expected qm_tab_0 shifted left by 240px, got {:?}",
+            b0_after_scroll_to
+        );
+
+        // Hover over hscroll rect and send horizontal wheel delta on_scroll(dx, 0.0).
+        ui.on_pointer_move(hs_rect.x + 100.0, hs_rect.y + 20.0);
+        ui.on_scroll(-3.0, 0.0);
+        for _ in 0..40 {
+            render(&mut ui, true);
+            ui.step_physics(0.016);
+        }
+        render(&mut ui, true);
+        assert!(
+            (ui.scroll_offset_x("qm_uilib_tabs_hscroll") - 336.0).abs() < 1.0,
+            "expected scroll_offset_x ~ 336.0 after on_scroll(-3.0, 0.0), got {}",
+            ui.scroll_offset_x("qm_uilib_tabs_hscroll")
+        );
+        let b0_after_wheel = ui
+            .semantics()
+            .iter()
+            .find(|n| n.label == "qm_tab_0")
+            .expect("qm_tab_0")
+            .bounds;
+        assert!(
+            (b0_after_wheel.x - (22.0 - 336.0)).abs() < 1.5,
+            "expected qm_tab_0 at ~ -314.0, got {:?}",
+            b0_after_wheel
+        );
     }
 }
