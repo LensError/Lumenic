@@ -22,6 +22,6 @@ pub use types::{
     PointerButton, PopoverId, Rect, RectShape, Span, TextAlign, TextureId, Theme, WindowConfig,
 };
 pub use widgets::{
-    vlist_range_binary_search, TableColumn, TableState, ToastCloseStyle, ToastCorner, ToastItem,
-    ToastLevel, ToastQueue, ToastStyle,
+    vlist_range_binary_search, DropdownStyle, TableColumn, TableState, ToastCloseStyle,
+    ToastCorner, ToastItem, ToastLevel, ToastQueue, ToastStyle,
 };

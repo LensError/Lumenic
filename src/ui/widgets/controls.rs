@@ -1,5 +1,485 @@
 use super::*;
 
+/// Visual styling overrides for [`UiContext::dropdown_styled`], [`UiContext::dropdown_with`],
+/// [`UiContext::combobox_styled`], and [`UiContext::combobox_with`] popup menus and items.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DropdownStyle {
+    /// Popup menu background color (defaults to `theme.surface`).
+    pub bg: Option<Color>,
+    /// Popup menu border width in logical points (defaults to `1.0`).
+    pub border_width: Option<f32>,
+    /// Popup menu border color (defaults to `theme.border`).
+    pub border_color: Option<Color>,
+    /// Popup menu corner radius or bevel size in logical points (defaults to `theme.radius`).
+    pub radius: Option<f32>,
+    /// Optional per-corner radii or bevel sizes `[tl, tr, br, bl]` for the popup menu.
+    pub corner_radii: Option<[f32; 4]>,
+    /// Optional vertex fillet radius for beveled popup menus.
+    pub corner_fillet: Option<f32>,
+    /// Optional SDF shape for the popup menu (defaults to [`RectShape::Box`]).
+    pub shape: Option<RectShape>,
+    /// Popup menu inner padding in logical points (defaults to `6.0`).
+    pub padding: Option<f32>,
+    /// Vertical gap between popup menu items in logical points (defaults to `4.0`).
+    pub gap: Option<f32>,
+    /// Optional maximum height for the scrollable item list in logical points.
+    /// Defaults to `None` (unbounded) for `dropdown`, and `210.0` for `combobox`.
+    pub max_height: Option<f32>,
+    /// Optional fixed popup width in logical points (defaults to trigger width clamped by `min_width`).
+    pub width: Option<f32>,
+    /// Minimum popup width in logical points (defaults to `160.0` for dropdown, `180.0` for combobox).
+    pub min_width: Option<f32>,
+    /// Drop shadow `(blur_radius, color)` for the popup menu. `None` disables the shadow.
+    pub shadow: Option<(f32, Color)>,
+    /// Enables frosted-glass backdrop blur (`.glass()`) on the popup menu.
+    pub glass: bool,
+    /// Optional font size in logical points for popup items (and default trigger text when set).
+    pub font_size: Option<f32>,
+    /// Optional font family name for popup items (and default trigger text when set).
+    pub font_family: Option<String>,
+    /// Optional `[horizontal, vertical]` padding in logical points for each popup item.
+    pub item_padding: Option<[f32; 2]>,
+    /// Optional explicit height in logical points for each popup item.
+    pub item_height: Option<f32>,
+    /// Popup item corner radius or bevel size in logical points (defaults to `6.0`).
+    pub item_radius: Option<f32>,
+    /// Optional per-corner radii or bevel sizes `[tl, tr, br, bl]` for each popup item.
+    pub item_corner_radii: Option<[f32; 4]>,
+    /// Optional vertex fillet radius for beveled popup items.
+    pub item_corner_fillet: Option<f32>,
+    /// Optional SDF shape for each popup item (defaults to [`RectShape::Box`]).
+    pub item_shape: Option<RectShape>,
+    /// Unselected item background color (defaults to `theme.surface_alt`).
+    pub item_bg: Option<Color>,
+    /// Unselected item hover background color.
+    pub item_hover_bg: Option<Color>,
+    /// Unselected item text color (defaults to `theme.text`).
+    pub item_fg: Option<Color>,
+    /// Selected item background color (defaults to `theme.primary`).
+    pub selected_bg: Option<Color>,
+    /// Selected item hover background color (defaults to `selected_bg`).
+    pub selected_hover_bg: Option<Color>,
+    /// Selected item text color (defaults to `theme.on_primary`).
+    pub selected_fg: Option<Color>,
+    /// Optional selected item border `(width, color)`.
+    pub selected_border: Option<(f32, Color)>,
+    /// Optional left accent bar color rendered inside the selected item row.
+    pub selected_indicator: Option<Color>,
+    /// Keyboard-highlighted item background color in combobox popups (defaults to `item_hover_bg` or `theme.border`).
+    pub highlight_bg: Option<Color>,
+    /// Optional text alignment for default popup item labels.
+    pub item_align: Option<TextAlign>,
+}
+
+impl Default for DropdownStyle {
+    fn default() -> Self {
+        Self {
+            bg: None,
+            border_width: None,
+            border_color: None,
+            radius: None,
+            corner_radii: None,
+            corner_fillet: None,
+            shape: None,
+            padding: None,
+            gap: None,
+            max_height: None,
+            width: None,
+            min_width: None,
+            shadow: Some((12.0, Color::rgba(0, 0, 0, 110))),
+            glass: false,
+            font_size: None,
+            font_family: None,
+            item_padding: None,
+            item_height: None,
+            item_radius: None,
+            item_corner_radii: None,
+            item_corner_fillet: None,
+            item_shape: None,
+            item_bg: None,
+            item_hover_bg: None,
+            item_fg: None,
+            selected_bg: None,
+            selected_hover_bg: None,
+            selected_fg: None,
+            selected_border: None,
+            selected_indicator: None,
+            highlight_bg: None,
+            item_align: None,
+        }
+    }
+}
+
+impl DropdownStyle {
+    /// Creates a new default dropdown popup style (inherits active `Theme` colors and radius).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Overrides the popup menu background color.
+    pub fn bg(mut self, color: Color) -> Self {
+        self.bg = Some(color);
+        self
+    }
+
+    /// Overrides the popup menu border width and color.
+    pub fn bd(mut self, width: f32, color: Color) -> Self {
+        self.border_width = Some(width.max(0.0));
+        self.border_color = Some(color);
+        self
+    }
+
+    /// Overrides the popup menu corner radius.
+    pub fn r(mut self, radius: f32) -> Self {
+        self.radius = Some(radius.max(0.0));
+        self.corner_radii = None;
+        self.corner_fillet = None;
+        self.shape = Some(RectShape::Box);
+        self
+    }
+
+    /// Renders the popup menu with uniform 45-degree beveled corners.
+    pub fn bevel(mut self, size: f32) -> Self {
+        let sz = size.max(0.0);
+        self.radius = Some(sz);
+        self.corner_radii = Some([sz; 4]);
+        self.corner_fillet = Some(0.0);
+        self.shape = Some(RectShape::Bevel);
+        self
+    }
+
+    /// Renders the popup menu with uniform 45-degree beveled corners and rounded vertex fillets.
+    pub fn bevel_rounded(mut self, size: f32, fillet_r: f32) -> Self {
+        let sz = size.max(0.0);
+        self.radius = Some(sz);
+        self.corner_radii = Some([sz; 4]);
+        self.corner_fillet = Some(fillet_r.max(0.0));
+        self.shape = Some(RectShape::Bevel);
+        self
+    }
+
+    /// Renders the popup menu with independent 45-degree beveled corners `[tl, tr, br, bl]`.
+    pub fn bevel_corners(mut self, tl: f32, tr: f32, br: f32, bl: f32) -> Self {
+        let c = [tl.max(0.0), tr.max(0.0), br.max(0.0), bl.max(0.0)];
+        self.radius = Some(c[0].max(c[1]).max(c[2]).max(c[3]));
+        self.corner_radii = Some(c);
+        self.corner_fillet = Some(0.0);
+        self.shape = Some(RectShape::Bevel);
+        self
+    }
+
+    /// Renders the popup menu with independent 45-degree beveled corners and rounded vertex fillets.
+    pub fn bevel_corners_rounded(
+        mut self,
+        tl: f32,
+        tr: f32,
+        br: f32,
+        bl: f32,
+        fillet_r: f32,
+    ) -> Self {
+        let c = [tl.max(0.0), tr.max(0.0), br.max(0.0), bl.max(0.0)];
+        self.radius = Some(c[0].max(c[1]).max(c[2]).max(c[3]));
+        self.corner_radii = Some(c);
+        self.corner_fillet = Some(fillet_r.max(0.0));
+        self.shape = Some(RectShape::Bevel);
+        self
+    }
+
+    /// Renders the popup menu with a continuous squircle shape.
+    pub fn squircle(mut self) -> Self {
+        self.shape = Some(RectShape::Squircle);
+        self
+    }
+
+    /// Overrides the popup menu inner padding in logical points.
+    pub fn p(mut self, padding: f32) -> Self {
+        self.padding = Some(padding.max(0.0));
+        self
+    }
+
+    /// Overrides the vertical gap between popup items in logical points.
+    pub fn gap(mut self, gap: f32) -> Self {
+        self.gap = Some(gap.max(0.0));
+        self
+    }
+
+    /// Caps the popup item list height in logical points (enabling vertical scrolling when exceeded).
+    pub fn max_h(mut self, max_height: f32) -> Self {
+        self.max_height = Some(max_height.max(24.0));
+        self
+    }
+
+    /// Sets an explicit popup width in logical points.
+    pub fn w(mut self, width: f32) -> Self {
+        self.width = Some(width.max(40.0));
+        self
+    }
+
+    /// Sets the minimum popup width in logical points.
+    pub fn min_w(mut self, min_width: f32) -> Self {
+        self.min_width = Some(min_width.max(40.0));
+        self
+    }
+
+    /// Sets the popup drop shadow blur radius and color.
+    pub fn shadow(mut self, blur: f32, color: Color) -> Self {
+        self.shadow = Some((blur.max(0.0), color));
+        self
+    }
+
+    /// Disables the popup drop shadow.
+    pub fn no_shadow(mut self) -> Self {
+        self.shadow = None;
+        self
+    }
+
+    /// Enables frosted-glass backdrop blur on the popup menu.
+    pub fn glass(mut self) -> Self {
+        self.glass = true;
+        self
+    }
+
+    /// Sets the font size in logical points for popup items (and default trigger text).
+    pub fn sz(mut self, font_size: f32) -> Self {
+        self.font_size = Some(font_size.max(6.0));
+        self
+    }
+
+    /// Sets the font family name for popup items (and default trigger text).
+    pub fn font(mut self, family: impl Into<String>) -> Self {
+        let s = family.into();
+        self.font_family = (!s.trim().is_empty()).then_some(s);
+        self
+    }
+
+    /// Sets horizontal and vertical padding in logical points for each popup item.
+    pub fn item_pad(mut self, px: f32, py: f32) -> Self {
+        self.item_padding = Some([px.max(0.0), py.max(0.0)]);
+        self
+    }
+
+    /// Sets an explicit height in logical points for each popup item.
+    pub fn item_h(mut self, height: f32) -> Self {
+        self.item_height = Some(height.max(12.0));
+        self
+    }
+
+    /// Overrides the corner radius for each popup item.
+    pub fn item_r(mut self, radius: f32) -> Self {
+        self.item_radius = Some(radius.max(0.0));
+        self.item_corner_radii = None;
+        self.item_corner_fillet = None;
+        self.item_shape = Some(RectShape::Box);
+        self
+    }
+
+    /// Renders each popup item with uniform 45-degree beveled corners.
+    pub fn item_bevel(mut self, size: f32) -> Self {
+        let sz = size.max(0.0);
+        self.item_radius = Some(sz);
+        self.item_corner_radii = Some([sz; 4]);
+        self.item_corner_fillet = Some(0.0);
+        self.item_shape = Some(RectShape::Bevel);
+        self
+    }
+
+    /// Renders each popup item with uniform 45-degree beveled corners and rounded vertex fillets.
+    pub fn item_bevel_rounded(mut self, size: f32, fillet_r: f32) -> Self {
+        let sz = size.max(0.0);
+        self.item_radius = Some(sz);
+        self.item_corner_radii = Some([sz; 4]);
+        self.item_corner_fillet = Some(fillet_r.max(0.0));
+        self.item_shape = Some(RectShape::Bevel);
+        self
+    }
+
+    /// Overrides the unselected item background color.
+    pub fn item_bg(mut self, color: Color) -> Self {
+        self.item_bg = Some(color);
+        self
+    }
+
+    /// Overrides the unselected item hover background color.
+    pub fn item_hover_bg(mut self, color: Color) -> Self {
+        self.item_hover_bg = Some(color);
+        self
+    }
+
+    /// Overrides the unselected item text color.
+    pub fn item_fg(mut self, color: Color) -> Self {
+        self.item_fg = Some(color);
+        self
+    }
+
+    /// Overrides the selected item background color.
+    pub fn selected_bg(mut self, color: Color) -> Self {
+        self.selected_bg = Some(color);
+        self
+    }
+
+    /// Overrides the selected item hover background color.
+    pub fn selected_hover_bg(mut self, color: Color) -> Self {
+        self.selected_hover_bg = Some(color);
+        self
+    }
+
+    /// Overrides the selected item text color.
+    pub fn selected_fg(mut self, color: Color) -> Self {
+        self.selected_fg = Some(color);
+        self
+    }
+
+    /// Sets a border width and color on the selected item.
+    pub fn selected_bd(mut self, width: f32, color: Color) -> Self {
+        self.selected_border = Some((width.max(0.0), color));
+        self
+    }
+
+    /// Renders a left accent bar in `color` inside the selected popup item.
+    pub fn selected_indicator(mut self, color: Color) -> Self {
+        self.selected_indicator = Some(color);
+        self
+    }
+
+    /// Overrides the keyboard-highlighted item background color in combobox popups.
+    pub fn highlight_bg(mut self, color: Color) -> Self {
+        self.highlight_bg = Some(color);
+        self
+    }
+
+    /// Sets the text alignment for default popup item labels.
+    pub fn item_align(mut self, align: TextAlign) -> Self {
+        self.item_align = Some(align);
+        self
+    }
+}
+
+fn apply_popup_container_style(
+    mut b: StyleBuilder<'_>,
+    style: &DropdownStyle,
+    theme: &Theme,
+    menu_x: f32,
+    menu_y: f32,
+    menu_w: f32,
+) {
+    let pad = style.padding.unwrap_or(6.0);
+    let gap = style.gap.unwrap_or(4.0);
+    let bg = style.bg.unwrap_or(theme.surface);
+    let bd_w = style.border_width.unwrap_or(1.0);
+    let bd_col = style.border_color.unwrap_or(theme.border);
+    let radius = style.radius.unwrap_or(theme.radius);
+
+    b = b
+        .pos(menu_x, menu_y)
+        .clamp_viewport()
+        .w(menu_w)
+        .p(pad)
+        .gap(gap)
+        .bg(bg);
+    if bd_w > 0.0 {
+        b = b.bd(bd_w, bd_col);
+    }
+    match style.shape {
+        Some(RectShape::Bevel) => {
+            let c = style.corner_radii.unwrap_or([radius; 4]);
+            let fillet = style.corner_fillet.unwrap_or(0.0);
+            b = b.bevel_corners_rounded(c[0], c[1], c[2], c[3], fillet);
+        }
+        Some(RectShape::Squircle) => {
+            b = b.r(radius).squircle();
+        }
+        _ => {
+            b = b.r(radius);
+            if let Some(c) = style.corner_radii {
+                b = b.r_corners(c[0], c[1], c[2], c[3]);
+            }
+        }
+    }
+    if let Some((blur, col)) = style.shadow {
+        if blur > 0.0 {
+            b = b.shadow(blur, col);
+        }
+    }
+    if style.glass {
+        let _ = b.glass();
+    }
+}
+
+fn apply_popup_item_style(
+    mut b: ButtonResponse<'_>,
+    style: &DropdownStyle,
+    bg: Color,
+    hover_bg: Option<Color>,
+    fg: Color,
+    is_sel: bool,
+) -> bool {
+    let item_r = style.item_radius.unwrap_or(6.0);
+    b = b.bg(bg).fg(fg);
+    if let Some(hbg) = hover_bg {
+        b = b.hover_bg(hbg);
+    }
+    if is_sel {
+        if let Some((bw, bc)) = style.selected_border {
+            if bw > 0.0 {
+                b = b.bd(bw, bc);
+            }
+        }
+    }
+    if let Some([px, py]) = style.item_padding {
+        b = b.px(px).py(py);
+    }
+    if let Some(h) = style.item_height {
+        b = b.h(h);
+    }
+    match style.item_shape {
+        Some(RectShape::Bevel) => {
+            let c = style.item_corner_radii.unwrap_or([item_r; 4]);
+            let fillet = style.item_corner_fillet.unwrap_or(0.0);
+            b = b.bevel_corners_rounded(c[0], c[1], c[2], c[3], fillet);
+        }
+        Some(RectShape::Squircle) => {
+            b = b.r(item_r).squircle();
+        }
+        _ => {
+            b = b.r(item_r);
+            if let Some(c) = style.item_corner_radii {
+                b = b.r_corners(c[0], c[1], c[2], c[3]);
+            }
+        }
+    }
+    b.clicked()
+}
+
+fn render_default_dropdown_item(
+    ui: &mut UiContext,
+    opt: &str,
+    fg: Color,
+    is_sel: bool,
+    style: &DropdownStyle,
+) {
+    if let Some(ind_col) = style.selected_indicator {
+        let ind_h = style.font_size.unwrap_or(ui.theme.font_size).max(10.0);
+        if is_sel {
+            ui.txt("").w(3.0).h(ind_h).bg(ind_col).r(1.5);
+        } else {
+            ui.txt("").w(3.0).h(ind_h);
+        }
+    }
+    let mut t = ui.txt(opt).fg(fg);
+    if let Some(sz) = style.font_size {
+        t = t.sz(sz);
+    }
+    if let Some(ref fam) = style.font_family {
+        t = t.font(fam.as_str());
+    }
+    if let Some(align) = style.item_align {
+        t = t.align(align).grow(1.0);
+    } else if style.selected_indicator.is_some() {
+        t = t.grow(1.0);
+    }
+    let _ = t;
+}
+
 impl UiContext {
     /// Stateless themed toggle switch with spring-animated thumb.
     ///
@@ -356,6 +836,42 @@ impl UiContext {
         selected: &mut usize,
         options: &[&str],
     ) -> StyleBuilder<'_> {
+        self.dropdown_styled(id_label, selected, options, &DropdownStyle::default())
+    }
+
+    /// Dropdown selector with customizable popup menu styling via [`DropdownStyle`].
+    ///
+    /// Returns a `StyleBuilder` targeting the trigger button (`.w()`, `.h()`, `.bg()`, `.fg()`,
+    /// `.bd()`, `.r()`, `.bevel_rounded()`, `.enabled()`, `.changed()`).
+    pub fn dropdown_styled(
+        &mut self,
+        id_label: &str,
+        selected: &mut usize,
+        options: &[&str],
+        style: &DropdownStyle,
+    ) -> StyleBuilder<'_> {
+        let item_fg = style.item_fg.unwrap_or(self.theme.text);
+        let sel_fg = style.selected_fg.unwrap_or(self.theme.on_primary);
+        self.dropdown_with(id_label, selected, options, style, |ui, _i, opt, is_sel| {
+            let fg = if is_sel { sel_fg } else { item_fg };
+            render_default_dropdown_item(ui, opt, fg, is_sel, style);
+        })
+    }
+
+    /// Dropdown selector with customizable popup styling and custom item row rendering.
+    ///
+    /// `item_fn(ui, index, label, is_selected)` populates the interior of each clickable option row.
+    pub fn dropdown_with<F>(
+        &mut self,
+        id_label: &str,
+        selected: &mut usize,
+        options: &[&str],
+        style: &DropdownStyle,
+        mut item_fn: F,
+    ) -> StyleBuilder<'_>
+    where
+        F: FnMut(&mut UiContext, usize, &str, bool),
+    {
         let id = self.ids.id(id_label);
         let disabled_prev = self.prev_disabled_ids.contains(&id);
         let mut changed = false;
@@ -368,7 +884,14 @@ impl UiContext {
         let radius = self.theme.radius;
         let trig_resp = self
             .btn_with("__dropdown_trig__", |ui| {
-                ui.txt(current_label).fg(text_col);
+                let mut t = ui.txt(current_label).fg(text_col);
+                if let Some(sz) = style.font_size {
+                    t = t.sz(sz);
+                }
+                if let Some(ref fam) = style.font_family {
+                    t = t.font(fam.as_str());
+                }
+                let _ = t;
                 emit_chevron_icon(ui, "__dd_chev__", ChevronDir::Down, 12.0, text_col);
             })
             .bg(surface_alt)
@@ -403,19 +926,21 @@ impl UiContext {
                     .get(&trigger_btn_id)
                     .copied()
                     .unwrap_or(Rect::new(0.0, 0.0, 160.0, 32.0));
-                let surface = self.theme.surface;
-                let surface_alt = self.theme.surface_alt;
-                let border = self.theme.border;
-                let primary = self.theme.primary;
-                let on_primary = self.theme.on_primary;
-                let text_col = self.theme.text;
-                let radius = self.theme.radius;
+                let theme = self.theme;
+                let item_bg = style.item_bg.unwrap_or(theme.surface_alt);
+                let sel_bg = style.selected_bg.unwrap_or(theme.primary);
+                let item_fg = style.item_fg.unwrap_or(theme.text);
+                let sel_fg = style.selected_fg.unwrap_or(theme.on_primary);
+                let pad = style.padding.unwrap_or(6.0);
+                let gap = style.gap.unwrap_or(4.0);
 
-                let menu_w = trig_rect
-                    .w
-                    .max(160.0)
-                    .min((self.viewport_w - 16.0).max(80.0));
-                let est_menu_h = (options.len() as f32) * 34.0 + 16.0;
+                let min_w = style.min_width.unwrap_or(160.0);
+                let raw_w = style.width.unwrap_or_else(|| trig_rect.w.max(min_w));
+                let menu_w = raw_w.min((self.viewport_w - 16.0).max(80.0));
+                let row_h = style.item_height.unwrap_or(30.0) + gap;
+                let content_h = (options.len() as f32) * row_h;
+                let capped_content_h = style.max_height.map_or(content_h, |mh| content_h.min(mh));
+                let est_menu_h = capped_content_h + pad * 2.0 + 4.0;
                 let menu_x = trig_rect
                     .x
                     .min((self.viewport_w - menu_w - 8.0).max(0.0))
@@ -429,33 +954,46 @@ impl UiContext {
                 };
 
                 let mut next_selected: Option<usize> = None;
-                self.overlay(|ui| {
-                    ui.ids.push_u64(id.0);
+                let use_left_justify =
+                    style.selected_indicator.is_some() || style.item_align.is_some();
+                let mut render_items = |ui: &mut UiContext| {
                     for (i, &opt) in options.iter().enumerate() {
                         ui.ids.push_u64(i as u64);
                         let is_sel = i == *selected;
-                        if ui
-                            .btn(opt)
-                            .bg(if is_sel { primary } else { surface_alt })
-                            .fg(if is_sel { on_primary } else { text_col })
-                            .r(6.0)
-                            .clicked()
-                        {
+                        let bg = if is_sel { sel_bg } else { item_bg };
+                        let hover_bg = if is_sel {
+                            style.selected_hover_bg
+                        } else {
+                            style.item_hover_bg
+                        };
+                        let fg = if is_sel { sel_fg } else { item_fg };
+                        let mut btn = ui.btn_with(opt, |ui| {
+                            item_fn(ui, i, opt, is_sel);
+                        });
+                        if use_left_justify {
+                            btn = btn.justify_start();
+                        }
+                        if apply_popup_item_style(btn, style, bg, hover_bg, fg, is_sel) {
                             next_selected = Some(i);
                         }
                         ui.ids.pop_id();
                     }
+                };
+
+                let ov = self.overlay(|ui| {
+                    ui.ids.push_u64(id.0);
+                    if let Some(mh) = style.max_height {
+                        ui.scroll("__dropdown_list__", |ui| {
+                            render_items(ui);
+                        })
+                        .max_h(mh)
+                        .gap(gap);
+                    } else {
+                        render_items(ui);
+                    }
                     ui.ids.pop_id();
-                })
-                .pos(menu_x, menu_y)
-                .clamp_viewport()
-                .w(menu_w)
-                .p(6.0)
-                .gap(4.0)
-                .bg(surface)
-                .bd(1.0, border)
-                .r(radius)
-                .shadow(12.0, Color::rgba(0, 0, 0, 110));
+                });
+                apply_popup_container_style(ov, style, &theme, menu_x, menu_y, menu_w);
 
                 if let Some(idx) = next_selected {
                     *selected = idx;
@@ -615,6 +1153,54 @@ impl UiContext {
         query: &mut TextEditState,
         options: &[&str],
     ) -> StyleBuilder<'_> {
+        self.combobox_styled(
+            id_label,
+            selected,
+            query,
+            options,
+            &DropdownStyle::default(),
+        )
+    }
+
+    /// Searchable combobox dropdown with customizable popup menu styling via [`DropdownStyle`].
+    pub fn combobox_styled(
+        &mut self,
+        id_label: &str,
+        selected: &mut usize,
+        query: &mut TextEditState,
+        options: &[&str],
+        style: &DropdownStyle,
+    ) -> StyleBuilder<'_> {
+        let item_fg = style.item_fg.unwrap_or(self.theme.text);
+        let sel_fg = style.selected_fg.unwrap_or(self.theme.on_primary);
+        self.combobox_with(
+            id_label,
+            selected,
+            query,
+            options,
+            style,
+            |ui, _orig_idx, opt, is_sel, _is_hl| {
+                let fg = if is_sel { sel_fg } else { item_fg };
+                render_default_dropdown_item(ui, opt, fg, is_sel, style);
+            },
+        )
+    }
+
+    /// Searchable combobox dropdown with customizable popup styling and custom item row rendering.
+    ///
+    /// `item_fn(ui, orig_index, label, is_selected, is_highlighted)` populates each clickable option row.
+    pub fn combobox_with<F>(
+        &mut self,
+        id_label: &str,
+        selected: &mut usize,
+        query: &mut TextEditState,
+        options: &[&str],
+        style: &DropdownStyle,
+        mut item_fn: F,
+    ) -> StyleBuilder<'_>
+    where
+        F: FnMut(&mut UiContext, usize, &str, bool, bool),
+    {
         let id = self.ids.id(id_label);
         let disabled_prev = self.prev_disabled_ids.contains(&id);
         let mut changed = false;
@@ -640,6 +1226,12 @@ impl UiContext {
             let (input_idx, chg) = ui.text_input_node("__combobox_input__", query, false, false);
             ui.nodes[input_idx].style.placeholder = Some(placeholder_txt);
             ui.nodes[input_idx].style.grow = 1.0;
+            if let Some(sz) = style.font_size {
+                ui.nodes[input_idx].style.font_size = Some(sz);
+            }
+            if let Some(ref fam) = style.font_family {
+                ui.nodes[input_idx].style.font_family = Some(fam.clone());
+            }
             input_changed = chg;
             if ui
                 .btn_with("__combo_toggle__", |ui| {
@@ -724,21 +1316,26 @@ impl UiContext {
                         .or_else(|| self.prev_rects.get(&input_id))
                         .copied()
                         .unwrap_or(Rect::new(0.0, 0.0, 220.0, 34.0));
-                    let surface = self.theme.surface;
-                    let surface_alt = self.theme.surface_alt;
-                    let border = self.theme.border;
-                    let primary = self.theme.primary;
-                    let on_primary = self.theme.on_primary;
-                    let text_col = self.theme.text;
-                    let muted = self.theme.text_muted;
-                    let radius = self.theme.radius;
+                    let theme = self.theme;
+                    let item_bg = style.item_bg.unwrap_or(theme.surface_alt);
+                    let sel_bg = style.selected_bg.unwrap_or(theme.primary);
+                    let hl_bg = style
+                        .highlight_bg
+                        .or(style.item_hover_bg)
+                        .unwrap_or(theme.border);
+                    let item_fg = style.item_fg.unwrap_or(theme.text);
+                    let sel_fg = style.selected_fg.unwrap_or(theme.on_primary);
+                    let muted = theme.text_muted;
+                    let pad = style.padding.unwrap_or(6.0);
+                    let gap = style.gap.unwrap_or(4.0);
+                    let max_h = style.max_height.unwrap_or(210.0);
                     let hl_idx = self.combobox_highlight.get(&id).copied().unwrap_or(0);
 
-                    let menu_w = trig_rect
-                        .w
-                        .max(180.0)
-                        .min((self.viewport_w - 16.0).max(80.0));
-                    let est_h = (filtered.len().clamp(1, 6) as f32) * 34.0 + 16.0;
+                    let min_w = style.min_width.unwrap_or(180.0);
+                    let raw_w = style.width.unwrap_or_else(|| trig_rect.w.max(min_w));
+                    let menu_w = raw_w.min((self.viewport_w - 16.0).max(80.0));
+                    let row_h = style.item_height.unwrap_or(30.0) + gap;
+                    let est_h = ((filtered.len().max(1) as f32) * row_h).min(max_h) + pad * 2.0 + 4.0;
                     let menu_x = trig_rect
                         .x
                         .min((self.viewport_w - menu_w - 8.0).max(0.0))
@@ -752,10 +1349,21 @@ impl UiContext {
                     };
 
                     let mut next_selected: Option<usize> = None;
-                    self.overlay(|ui| {
+                    let use_left_justify =
+                        style.selected_indicator.is_some() || style.item_align.is_some();
+                    let ov = self.overlay(|ui| {
                         ui.ids.push_u64(id.0);
                         if filtered.is_empty() {
-                            ui.txt("No matches").sz(12.0).fg(muted).px(8.0).py(6.0);
+                            let mut empty = ui
+                                .txt("No matches")
+                                .sz(style.font_size.unwrap_or(12.0))
+                                .fg(muted)
+                                .px(8.0)
+                                .py(6.0);
+                            if let Some(ref fam) = style.font_family {
+                                empty = empty.font(fam.as_str());
+                            }
+                            let _ = empty;
                         } else {
                             ui.scroll("__combobox_list__", |ui| {
                                 for (fi, &(orig_idx, opt)) in filtered.iter().enumerate() {
@@ -763,38 +1371,37 @@ impl UiContext {
                                     let is_sel = orig_idx == *selected;
                                     let is_hl = fi == hl_idx;
                                     let bg = if is_sel {
-                                        primary
+                                        sel_bg
                                     } else if is_hl {
-                                        border
+                                        hl_bg
                                     } else {
-                                        surface_alt
+                                        item_bg
                                     };
-                                    if ui
-                                        .btn(opt)
-                                        .bg(bg)
-                                        .fg(if is_sel { on_primary } else { text_col })
-                                        .r(6.0)
-                                        .clicked()
+                                    let hover_bg = if is_sel {
+                                        style.selected_hover_bg
+                                    } else {
+                                        style.item_hover_bg
+                                    };
+                                    let fg = if is_sel { sel_fg } else { item_fg };
+                                    let mut btn = ui.btn_with(opt, |ui| {
+                                        item_fn(ui, orig_idx, opt, is_sel, is_hl);
+                                    });
+                                    if use_left_justify {
+                                        btn = btn.justify_start();
+                                    }
+                                    if apply_popup_item_style(btn, style, bg, hover_bg, fg, is_sel)
                                     {
                                         next_selected = Some(orig_idx);
                                     }
                                     ui.ids.pop_id();
                                 }
                             })
-                            .max_h(210.0)
-                            .gap(4.0);
+                            .max_h(max_h)
+                            .gap(gap);
                         }
                         ui.ids.pop_id();
-                    })
-                    .pos(menu_x, menu_y)
-                    .clamp_viewport()
-                    .w(menu_w)
-                    .p(6.0)
-                    .gap(4.0)
-                    .bg(surface)
-                    .bd(1.0, border)
-                    .r(radius)
-                    .shadow(12.0, Color::rgba(0, 0, 0, 110));
+                    });
+                    apply_popup_container_style(ov, style, &theme, menu_x, menu_y, menu_w);
 
                     if let Some(orig_idx) = next_selected {
                         if *selected != orig_idx {

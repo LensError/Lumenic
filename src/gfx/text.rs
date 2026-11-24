@@ -130,6 +130,13 @@ struct CachedGlyph {
     is_color: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum GlyphLookup {
+    Ready(CachedGlyph),
+    Empty,
+    Overflow,
+}
+
 /// Shaped glyph quad in physical framebuffer pixels paired with integer atlas texel bounds.
 #[derive(Clone, Copy, Debug)]
 pub struct ShapedGlyphQuad {
@@ -177,6 +184,9 @@ pub struct GlyphAtlas {
     scratch_buf: Buffer,
     measure_cache: HashMap<(u64, u64), [f32; 2]>,
     shape_cache: HashMap<(u64, u64), Vec<CachedShapedGlyph>>,
+    atlas_epoch: u64,
+    batch_defer_reset: bool,
+    batch_overflowed: bool,
 }
 
 impl GlyphAtlas {
@@ -251,6 +261,9 @@ impl GlyphAtlas {
             scratch_buf,
             measure_cache: HashMap::new(),
             shape_cache: HashMap::new(),
+            atlas_epoch: 0,
+            batch_defer_reset: false,
+            batch_overflowed: false,
         };
         atlas.sync_registered_fonts();
         atlas
@@ -289,9 +302,8 @@ impl GlyphAtlas {
                     }
                     self.has_italic_face = db.faces().any(|f| f.style == Style::Italic);
                     self.registered_count = new_total;
-                    self.cache.clear();
+                    self.reset_atlas();
                     self.measure_cache.clear();
-                    self.shape_cache.clear();
                 }
             }
         }
@@ -307,9 +319,8 @@ impl GlyphAtlas {
                 db.set_serif_family(fam);
             }
             self.applied_default_sans = desired_sans;
-            self.cache.clear();
+            self.reset_atlas();
             self.measure_cache.clear();
-            self.shape_cache.clear();
         }
 
         let raw_mono = DEFAULT_MONO_FAMILY
@@ -321,9 +332,8 @@ impl GlyphAtlas {
                 self.font_system.db_mut().set_monospace_family(fam);
             }
             self.applied_default_mono = desired_mono;
-            self.cache.clear();
+            self.reset_atlas();
             self.measure_cache.clear();
-            self.shape_cache.clear();
         }
     }
 
@@ -524,9 +534,46 @@ impl GlyphAtlas {
         true
     }
 
+    /// Clears all packed glyphs from the atlas while preserving allocated texture dimensions,
+    /// forcing a full GPU upload on the next frame so active glyphs can be freshly repacked.
+    pub fn reset_atlas(&mut self) {
+        self.pixels.fill(0);
+        for y in 0..2u32 {
+            for x in 0..2u32 {
+                let idx = ((y as usize) * (self.atlas_w as usize) + (x as usize)) * 4;
+                self.pixels[idx..idx + 4].copy_from_slice(&[255, 255, 255, 255]);
+            }
+        }
+        self.cursor_x = 3;
+        self.cursor_y = 1;
+        self.shelf_h = 2;
+        self.used_area = 4;
+        self.cache.clear();
+        self.shape_cache.clear();
+        self.dirty_upload = true;
+        self.dirty_full = true;
+        self.dirty_y_range = None;
+        self.atlas_epoch = self.atlas_epoch.wrapping_add(1);
+    }
+
+    pub(crate) fn begin_batch(&mut self) {
+        self.batch_defer_reset = true;
+        self.batch_overflowed = false;
+    }
+
+    pub(crate) fn end_batch(&mut self) -> bool {
+        self.batch_defer_reset = false;
+        let overflowed = self.batch_overflowed;
+        self.batch_overflowed = false;
+        overflowed
+    }
+
     fn alloc_atlas_slot(&mut self, w: u32, h: u32) -> Option<[u32; 2]> {
         let w_pad = w.checked_add(1)?;
         let h_pad = h.checked_add(1)?;
+        if w_pad > MAX_ATLAS_SIZE || h_pad > MAX_ATLAS_SIZE {
+            return None;
+        }
 
         if self.cursor_x.checked_add(w_pad)? > self.atlas_w {
             self.cursor_y = self.cursor_y.checked_add(self.shelf_h.checked_add(1)?)?;
@@ -552,9 +599,12 @@ impl GlyphAtlas {
         Some(pos)
     }
 
-    fn ensure_glyph(&mut self, cache_key: CacheKey) -> Option<CachedGlyph> {
+    fn ensure_glyph(&mut self, cache_key: CacheKey) -> GlyphLookup {
         if let Some(entry) = self.cache.get(&cache_key) {
-            return *entry;
+            return match *entry {
+                Some(cached) => GlyphLookup::Ready(cached),
+                None => GlyphLookup::Empty,
+            };
         }
 
         let img_opt = self
@@ -562,17 +612,34 @@ impl GlyphAtlas {
             .get_image_uncached(&mut self.font_system, cache_key);
         let Some(img) = img_opt else {
             self.cache.insert(cache_key, None);
-            return None;
+            return GlyphLookup::Empty;
         };
 
         let gw = img.placement.width;
         let gh = img.placement.height;
         if gw == 0 || gh == 0 {
             self.cache.insert(cache_key, None);
-            return None;
+            return GlyphLookup::Empty;
+        }
+        if gw.saturating_add(1) > MAX_ATLAS_SIZE || gh.saturating_add(1) > MAX_ATLAS_SIZE {
+            self.cache.insert(cache_key, None);
+            return GlyphLookup::Empty;
         }
 
-        let [ax, ay] = self.alloc_atlas_slot(gw, gh)?;
+        let [ax, ay] = match self.alloc_atlas_slot(gw, gh) {
+            Some(pos) => pos,
+            None => {
+                if self.batch_defer_reset {
+                    self.batch_overflowed = true;
+                    return GlyphLookup::Overflow;
+                }
+                self.reset_atlas();
+                match self.alloc_atlas_slot(gw, gh) {
+                    Some(pos) => pos,
+                    None => return GlyphLookup::Overflow,
+                }
+            }
+        };
 
         let is_color = matches!(img.content, SwashContent::Color);
         let aw = self.atlas_w as usize;
@@ -627,7 +694,7 @@ impl GlyphAtlas {
             is_color,
         };
         self.cache.insert(cache_key, Some(cached));
-        Some(cached)
+        GlyphLookup::Ready(cached)
     }
 
     fn attrs_for_span<'a>(
@@ -909,61 +976,81 @@ impl GlyphAtlas {
 
         let mut out = ShapedTextOutput::default();
         let mut cached_list = Vec::new();
+        let mut had_overflow = false;
 
-        for run in buf.layout_runs() {
-            let line_y_px = (run.line_y * scale).round();
-            if rect.h > 0.0 && run.line_top > rect.h {
-                break;
-            }
-            let extra_track = if run.glyphs.len() > 1 {
-                (run.glyphs.len() - 1) as f32 * track_px
-            } else {
-                0.0
-            };
-            let line_w_px = (run.line_w * scale + extra_track).max(0.0);
-            let align_x_px = match align {
-                TextAlign::Left => 0.0,
-                TextAlign::Center => ((rect_w_px - line_w_px).max(0.0) * 0.5).round(),
-                TextAlign::Right => (rect_w_px - line_w_px).max(0.0).round(),
-            };
-            for (gi, glyph) in run.glyphs.iter().enumerate() {
-                let phys = glyph.physical((0.0, 0.0), scale);
-                let Some(cached) = self.ensure_glyph(phys.cache_key) else {
-                    continue;
-                };
-                let rel_x = align_x_px
-                    + phys.x as f32
-                    + (gi as f32 * track_px).round()
-                    + cached.left as f32;
-                let rel_y = line_y_px + phys.y as f32 - cached.top as f32;
-                let gx = origin_x_px + rel_x;
-                let gy = origin_y_px + rel_y;
-                let qcolor = if cached.is_color {
-                    Color::rgba(255, 255, 255, color.a)
+        for attempt in 0..2 {
+            let start_epoch = self.atlas_epoch;
+            out.glyphs.clear();
+            cached_list.clear();
+            had_overflow = false;
+
+            for run in buf.layout_runs() {
+                let line_y_px = (run.line_y * scale).round();
+                if rect.h > 0.0 && run.line_top > rect.h {
+                    break;
+                }
+                let extra_track = if run.glyphs.len() > 1 {
+                    (run.glyphs.len() - 1) as f32 * track_px
                 } else {
-                    color
+                    0.0
                 };
-                let atlas_px = [cached.px_x, cached.px_y, cached.px_w, cached.px_h];
-                cached_list.push(CachedShapedGlyph {
-                    rel_x,
-                    rel_y,
-                    w: cached.px_w as f32,
-                    h: cached.px_h as f32,
-                    atlas_px,
-                    is_color: cached.is_color,
-                });
-                out.glyphs.push(ShapedGlyphQuad {
-                    phys_rect: [gx, gy, cached.px_w as f32, cached.px_h as f32],
-                    atlas_px,
-                    color: qcolor,
-                });
+                let line_w_px = (run.line_w * scale + extra_track).max(0.0);
+                let align_x_px = match align {
+                    TextAlign::Left => 0.0,
+                    TextAlign::Center => ((rect_w_px - line_w_px).max(0.0) * 0.5).round(),
+                    TextAlign::Right => (rect_w_px - line_w_px).max(0.0).round(),
+                };
+                for (gi, glyph) in run.glyphs.iter().enumerate() {
+                    let phys = glyph.physical((0.0, 0.0), scale);
+                    let cached = match self.ensure_glyph(phys.cache_key) {
+                        GlyphLookup::Ready(c) => c,
+                        GlyphLookup::Empty => continue,
+                        GlyphLookup::Overflow => {
+                            had_overflow = true;
+                            continue;
+                        }
+                    };
+                    let rel_x = align_x_px
+                        + phys.x as f32
+                        + (gi as f32 * track_px).round()
+                        + cached.left as f32;
+                    let rel_y = line_y_px + phys.y as f32 - cached.top as f32;
+                    let gx = origin_x_px + rel_x;
+                    let gy = origin_y_px + rel_y;
+                    let qcolor = if cached.is_color {
+                        Color::rgba(255, 255, 255, color.a)
+                    } else {
+                        color
+                    };
+                    let atlas_px = [cached.px_x, cached.px_y, cached.px_w, cached.px_h];
+                    cached_list.push(CachedShapedGlyph {
+                        rel_x,
+                        rel_y,
+                        w: cached.px_w as f32,
+                        h: cached.px_h as f32,
+                        atlas_px,
+                        is_color: cached.is_color,
+                    });
+                    out.glyphs.push(ShapedGlyphQuad {
+                        phys_rect: [gx, gy, cached.px_w as f32, cached.px_h as f32],
+                        atlas_px,
+                        color: qcolor,
+                    });
+                }
             }
+
+            if self.atlas_epoch != start_epoch && attempt == 0 {
+                continue;
+            }
+            break;
         }
         self.scratch_buf = buf;
-        if self.shape_cache.len() >= MAX_TEXT_CACHE_ENTRIES {
-            self.shape_cache.clear();
+        if !had_overflow {
+            if self.shape_cache.len() >= MAX_TEXT_CACHE_ENTRIES {
+                self.shape_cache.clear();
+            }
+            self.shape_cache.insert(cache_key, cached_list);
         }
-        self.shape_cache.insert(cache_key, cached_list);
         out
     }
 
@@ -1093,118 +1180,143 @@ impl GlyphAtlas {
         let rect_w_px = (rect.w * scale).max(0.0);
         let mut out = ShapedTextOutput::default();
 
-        for run in buf.layout_runs() {
-            let line_y_px = (run.line_y * scale).round();
-            let line_top_px = origin_y_px + (run.line_top * scale).round();
-            let line_h_px = (run.line_height * scale).round();
-            if rect.h > 0.0 && run.line_top > rect.h {
-                break;
+        for attempt in 0..2 {
+            let start_epoch = self.atlas_epoch;
+            out.bg_rects.clear();
+            out.glyphs.clear();
+            out.fg_rects.clear();
+
+            for run in buf.layout_runs() {
+                let line_y_px = (run.line_y * scale).round();
+                let line_top_px = origin_y_px + (run.line_top * scale).round();
+                let line_h_px = (run.line_height * scale).round();
+                if rect.h > 0.0 && run.line_top > rect.h {
+                    break;
+                }
+                let extra_track = if run.glyphs.len() > 1 {
+                    (run.glyphs.len() - 1) as f32 * track_px
+                } else {
+                    0.0
+                };
+                let line_w_px = (run.line_w * scale + extra_track).max(0.0);
+                let align_x_px = match align {
+                    TextAlign::Left => 0.0,
+                    TextAlign::Center => ((rect_w_px - line_w_px).max(0.0) * 0.5).round(),
+                    TextAlign::Right => (rect_w_px - line_w_px).max(0.0).round(),
+                };
+
+                let mut cur_span_idx: Option<usize> = None;
+                let mut span_x0 = 0.0_f32;
+                let mut span_x1 = 0.0_f32;
+
+                let flush_span_decor = |idx_opt: Option<usize>,
+                                        x0: f32,
+                                        x1: f32,
+                                        out: &mut ShapedTextOutput| {
+                    let Some(si) = idx_opt else {
+                        return;
+                    };
+                    let Some(sp) = spans.get(si) else {
+                        return;
+                    };
+                    let w = (x1 - x0).max(0.0);
+                    if w <= 0.0 {
+                        return;
+                    }
+                    match sp.kind {
+                        SpanKind::Code => {
+                            out.bg_rects.push(RichDecorationRect {
+                                phys_rect: [
+                                    x0 - 2.0 * scale,
+                                    line_top_px,
+                                    w + 4.0 * scale,
+                                    line_h_px,
+                                ],
+                                color: code_bg,
+                                radius: 4.0 * scale,
+                            });
+                        }
+                        SpanKind::Mention => {
+                            out.bg_rects.push(RichDecorationRect {
+                                phys_rect: [
+                                    x0 - 2.0 * scale,
+                                    line_top_px,
+                                    w + 4.0 * scale,
+                                    line_h_px,
+                                ],
+                                color: mention_bg,
+                                radius: 4.0 * scale,
+                            });
+                        }
+                        SpanKind::Link => {
+                            out.fg_rects.push(RichDecorationRect {
+                                phys_rect: [
+                                    x0,
+                                    origin_y_px + line_y_px + (2.0 * scale).round(),
+                                    w,
+                                    (1.0 * scale).max(1.0),
+                                ],
+                                color: link_color,
+                                radius: 0.0,
+                            });
+                        }
+                        _ => {}
+                    }
+                };
+
+                for (gi, glyph) in run.glyphs.iter().enumerate() {
+                    let t_off = (gi as f32 * track_px).round();
+                    let gx0 = origin_x_px + align_x_px + (glyph.x * scale).round() + t_off;
+                    let gx1 =
+                        origin_x_px + align_x_px + ((glyph.x + glyph.w) * scale).round() + t_off;
+
+                    if cur_span_idx != Some(glyph.metadata) {
+                        flush_span_decor(cur_span_idx, span_x0, span_x1, &mut out);
+                        cur_span_idx = Some(glyph.metadata);
+                        span_x0 = gx0;
+                        span_x1 = gx1;
+                    } else {
+                        span_x0 = span_x0.min(gx0);
+                        span_x1 = span_x1.max(gx1);
+                    }
+
+                    let phys = glyph.physical((0.0, 0.0), scale);
+                    let cached = match self.ensure_glyph(phys.cache_key) {
+                        GlyphLookup::Ready(c) => c,
+                        GlyphLookup::Empty | GlyphLookup::Overflow => continue,
+                    };
+
+                    let base_col = if let Some(c) = spans.get(glyph.metadata).and_then(|s| s.color)
+                    {
+                        c
+                    } else {
+                        match spans.get(glyph.metadata).map(|s| s.kind) {
+                            Some(SpanKind::Link) | Some(SpanKind::Mention) => link_color,
+                            _ => default_color,
+                        }
+                    };
+                    let qcolor = if cached.is_color {
+                        Color::rgba(255, 255, 255, base_col.a)
+                    } else {
+                        base_col
+                    };
+
+                    let qx = origin_x_px + align_x_px + phys.x as f32 + t_off + cached.left as f32;
+                    let qy = origin_y_px + line_y_px + phys.y as f32 - cached.top as f32;
+                    out.glyphs.push(ShapedGlyphQuad {
+                        phys_rect: [qx, qy, cached.px_w as f32, cached.px_h as f32],
+                        atlas_px: [cached.px_x, cached.px_y, cached.px_w, cached.px_h],
+                        color: qcolor,
+                    });
+                }
+
+                flush_span_decor(cur_span_idx, span_x0, span_x1, &mut out);
             }
-            let extra_track = if run.glyphs.len() > 1 {
-                (run.glyphs.len() - 1) as f32 * track_px
-            } else {
-                0.0
-            };
-            let line_w_px = (run.line_w * scale + extra_track).max(0.0);
-            let align_x_px = match align {
-                TextAlign::Left => 0.0,
-                TextAlign::Center => ((rect_w_px - line_w_px).max(0.0) * 0.5).round(),
-                TextAlign::Right => (rect_w_px - line_w_px).max(0.0).round(),
-            };
 
-            let mut cur_span_idx: Option<usize> = None;
-            let mut span_x0 = 0.0_f32;
-            let mut span_x1 = 0.0_f32;
-
-            let flush_span_decor = |idx_opt: Option<usize>,
-                                    x0: f32,
-                                    x1: f32,
-                                    out: &mut ShapedTextOutput| {
-                let Some(si) = idx_opt else {
-                    return;
-                };
-                let Some(sp) = spans.get(si) else {
-                    return;
-                };
-                let w = (x1 - x0).max(0.0);
-                if w <= 0.0 {
-                    return;
-                }
-                match sp.kind {
-                    SpanKind::Code => {
-                        out.bg_rects.push(RichDecorationRect {
-                            phys_rect: [x0 - 2.0 * scale, line_top_px, w + 4.0 * scale, line_h_px],
-                            color: code_bg,
-                            radius: 4.0 * scale,
-                        });
-                    }
-                    SpanKind::Mention => {
-                        out.bg_rects.push(RichDecorationRect {
-                            phys_rect: [x0 - 2.0 * scale, line_top_px, w + 4.0 * scale, line_h_px],
-                            color: mention_bg,
-                            radius: 4.0 * scale,
-                        });
-                    }
-                    SpanKind::Link => {
-                        out.fg_rects.push(RichDecorationRect {
-                            phys_rect: [
-                                x0,
-                                origin_y_px + line_y_px + (2.0 * scale).round(),
-                                w,
-                                (1.0 * scale).max(1.0),
-                            ],
-                            color: link_color,
-                            radius: 0.0,
-                        });
-                    }
-                    _ => {}
-                }
-            };
-
-            for (gi, glyph) in run.glyphs.iter().enumerate() {
-                let t_off = (gi as f32 * track_px).round();
-                let gx0 = origin_x_px + align_x_px + (glyph.x * scale).round() + t_off;
-                let gx1 = origin_x_px + align_x_px + ((glyph.x + glyph.w) * scale).round() + t_off;
-
-                if cur_span_idx != Some(glyph.metadata) {
-                    flush_span_decor(cur_span_idx, span_x0, span_x1, &mut out);
-                    cur_span_idx = Some(glyph.metadata);
-                    span_x0 = gx0;
-                    span_x1 = gx1;
-                } else {
-                    span_x0 = span_x0.min(gx0);
-                    span_x1 = span_x1.max(gx1);
-                }
-
-                let phys = glyph.physical((0.0, 0.0), scale);
-                let Some(cached) = self.ensure_glyph(phys.cache_key) else {
-                    continue;
-                };
-
-                let base_col = if let Some(c) = spans.get(glyph.metadata).and_then(|s| s.color) {
-                    c
-                } else {
-                    match spans.get(glyph.metadata).map(|s| s.kind) {
-                        Some(SpanKind::Link) | Some(SpanKind::Mention) => link_color,
-                        _ => default_color,
-                    }
-                };
-                let qcolor = if cached.is_color {
-                    Color::rgba(255, 255, 255, base_col.a)
-                } else {
-                    base_col
-                };
-
-                let qx = origin_x_px + align_x_px + phys.x as f32 + t_off + cached.left as f32;
-                let qy = origin_y_px + line_y_px + phys.y as f32 - cached.top as f32;
-                out.glyphs.push(ShapedGlyphQuad {
-                    phys_rect: [qx, qy, cached.px_w as f32, cached.px_h as f32],
-                    atlas_px: [cached.px_x, cached.px_y, cached.px_w, cached.px_h],
-                    color: qcolor,
-                });
+            if self.atlas_epoch != start_epoch && attempt == 0 {
+                continue;
             }
-
-            flush_span_decor(cur_span_idx, span_x0, span_x1, &mut out);
+            break;
         }
 
         self.scratch_buf = buf;
@@ -1830,5 +1942,114 @@ mod tests {
             1.35,
         );
         assert!(out.glyphs.len() >= 6);
+    }
+
+    #[test]
+    fn glyph_atlas_overflow_repacks_without_dropping_glyphs() {
+        let mut atlas = GlyphAtlas::new_fallback_only();
+        let sample = "Invite Join Offline Recently Seen 12:44 AM";
+        let expected_glyphs = atlas
+            .shape_plain_to_quads(
+                sample,
+                Rect::new(0.0, 0.0, 800.0, 100.0),
+                1.0,
+                Color::WHITE,
+                24.0,
+                false,
+                false,
+            )
+            .glyphs
+            .len();
+        assert!(expected_glyphs >= 30);
+
+        // Drive atlas past 2048x2048 capacity by rasterizing many distinct large font sizes.
+        let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()";
+        let mut size = 36.0_f32;
+        while atlas.atlas_epoch == 0 && size < 240.0 {
+            let out = atlas.shape_plain_to_quads(
+                alphabet,
+                Rect::new(0.0, 0.0, 4000.0, 300.0),
+                1.0,
+                Color::WHITE,
+                size,
+                false,
+                false,
+            );
+            assert!(
+                out.glyphs.len() >= 60,
+                "direct shaping must not drop glyphs at size {size}"
+            );
+            size += 2.0;
+        }
+        assert!(
+            atlas.atlas_epoch >= 1,
+            "test must exercise at least one atlas overflow reset"
+        );
+        assert!(matches!(
+            atlas.take_dirty_upload_region(),
+            Some(super::AtlasUpload::Full { .. })
+        ));
+
+        // Now verify SdfBatch::build mid-frame overflow triggers clean repack with zero dropped glyphs.
+        let epoch_before = atlas.atlas_epoch;
+        let mut batch = crate::gfx::sdf::SdfBatch::default();
+        let mut s = 44.0_f32;
+        let mut triggered_batch_reset = false;
+        for _ in 0..120 {
+            let mut dl = crate::ui::draw::DrawList::default();
+            for row in 0..4 {
+                dl.base_cmds.push(crate::ui::draw::DrawCmd::Text {
+                    rect: Rect::new(10.0, 10.0 + row as f32 * 90.0, 780.0, 80.0),
+                    text: if row == 0 {
+                        String::from(sample)
+                    } else {
+                        String::from(alphabet)
+                    },
+                    color: Color::WHITE,
+                    size: s + row as f32 * 1.5,
+                    weight: 400,
+                    mono: false,
+                    font_family: None,
+                    wrap: false,
+                    ellipsis: false,
+                    align: crate::ui::types::TextAlign::Left,
+                    tracking: 0.0,
+                    line_height: 1.35,
+                    transform: [1.0, 0.0, 0.0, 0.0],
+                });
+            }
+            batch.build(&dl, &mut atlas, 1.0, None, 800, 600);
+            if atlas.atlas_epoch > epoch_before {
+                triggered_batch_reset = true;
+                break;
+            }
+            s += 2.5;
+        }
+        assert!(
+            triggered_batch_reset,
+            "batch shaping should exercise mid-frame overflow reset"
+        );
+        assert!(matches!(
+            atlas.take_dirty_upload_region(),
+            Some(super::AtlasUpload::Full { .. })
+        ));
+
+        // Every glyph of the sample string at a new size must still render completely.
+        let after = atlas.shape_plain_to_quads(
+            sample,
+            Rect::new(0.0, 0.0, 800.0, 100.0),
+            1.0,
+            Color::WHITE,
+            24.5,
+            false,
+            false,
+        );
+        assert_eq!(after.glyphs.len(), expected_glyphs);
+        let [aw, ah] = atlas.atlas_size();
+        for g in &after.glyphs {
+            assert!(g.atlas_px[2] > 0 && g.atlas_px[3] > 0);
+            assert!(g.atlas_px[0] + g.atlas_px[2] <= aw);
+            assert!(g.atlas_px[1] + g.atlas_px[3] <= ah);
+        }
     }
 }

@@ -177,105 +177,118 @@ impl SdfBatch {
         }
         let mut pre_clip_stack: Vec<Rect> = Vec::new();
         let mut shaped_texts: Vec<PendingText> = Vec::new();
-        for cmd in draw_list.all_commands() {
-            match cmd {
-                DrawCmd::PushClip(rect) => {
-                    let next = if let Some(prev) = pre_clip_stack.last() {
-                        prev.intersect(*rect)
-                    } else {
-                        *rect
-                    };
-                    pre_clip_stack.push(next);
-                }
-                DrawCmd::PopClip => {
-                    pre_clip_stack.pop();
-                }
-                DrawCmd::Text {
-                    rect,
-                    text,
-                    color,
-                    size,
-                    weight,
-                    mono,
-                    font_family,
-                    wrap,
-                    ellipsis,
-                    align,
-                    tracking,
-                    line_height,
-                    transform,
-                    ..
-                } => {
-                    if cull_enabled && rect.w > 0.0 && rect.h > 0.0 {
-                        let visible = active_visible_clip(&pre_clip_stack, viewport_logical);
-                        let bounds = conservative_transformed_bounds(*rect, *transform, 4.0);
-                        if !rects_overlap(bounds, visible) {
-                            shaped_texts.push(PendingText::Culled);
-                            continue;
-                        }
-                    }
-                    let shaped = atlas.shape_plain_formatted_to_quads(
-                        text,
-                        *rect,
-                        scale,
-                        *color,
-                        *size,
-                        *weight,
-                        *mono,
-                        font_family.as_deref(),
-                        *wrap,
-                        *ellipsis,
-                        *align,
-                        *tracking,
-                        *line_height,
-                    );
-                    shaped_texts.push(PendingText::Plain(shaped));
-                }
-                DrawCmd::RichText {
-                    rect,
-                    spans,
-                    default_color,
-                    code_bg,
-                    mention_bg,
-                    link_color,
-                    size,
-                    font_family,
-                    wrap,
-                    ellipsis,
-                    align,
-                    tracking,
-                    line_height,
-                    transform,
-                    ..
-                } => {
-                    if cull_enabled && rect.w > 0.0 && rect.h > 0.0 {
-                        let visible = active_visible_clip(&pre_clip_stack, viewport_logical);
-                        let bounds = conservative_transformed_bounds(*rect, *transform, 4.0);
-                        if !rects_overlap(bounds, visible) {
-                            shaped_texts.push(PendingText::Culled);
-                            continue;
-                        }
-                    }
-                    let shaped = atlas.shape_rich_formatted_to_quads(
-                        spans,
-                        *rect,
-                        scale,
-                        *default_color,
-                        *code_bg,
-                        *mention_bg,
-                        *link_color,
-                        *size,
-                        font_family.as_deref(),
-                        *wrap,
-                        *ellipsis,
-                        *align,
-                        *tracking,
-                        *line_height,
-                    );
-                    shaped_texts.push(PendingText::Rich(shaped));
-                }
-                _ => {}
+        for pass in 0..2 {
+            pre_clip_stack.clear();
+            shaped_texts.clear();
+            if pass == 0 {
+                atlas.begin_batch();
             }
+            for cmd in draw_list.all_commands() {
+                match cmd {
+                    DrawCmd::PushClip(rect) => {
+                        let next = if let Some(prev) = pre_clip_stack.last() {
+                            prev.intersect(*rect)
+                        } else {
+                            *rect
+                        };
+                        pre_clip_stack.push(next);
+                    }
+                    DrawCmd::PopClip => {
+                        pre_clip_stack.pop();
+                    }
+                    DrawCmd::Text {
+                        rect,
+                        text,
+                        color,
+                        size,
+                        weight,
+                        mono,
+                        font_family,
+                        wrap,
+                        ellipsis,
+                        align,
+                        tracking,
+                        line_height,
+                        transform,
+                        ..
+                    } => {
+                        if cull_enabled && rect.w > 0.0 && rect.h > 0.0 {
+                            let visible = active_visible_clip(&pre_clip_stack, viewport_logical);
+                            let bounds = conservative_transformed_bounds(*rect, *transform, 4.0);
+                            if !rects_overlap(bounds, visible) {
+                                shaped_texts.push(PendingText::Culled);
+                                continue;
+                            }
+                        }
+                        let shaped = atlas.shape_plain_formatted_to_quads(
+                            text,
+                            *rect,
+                            scale,
+                            *color,
+                            *size,
+                            *weight,
+                            *mono,
+                            font_family.as_deref(),
+                            *wrap,
+                            *ellipsis,
+                            *align,
+                            *tracking,
+                            *line_height,
+                        );
+                        shaped_texts.push(PendingText::Plain(shaped));
+                    }
+                    DrawCmd::RichText {
+                        rect,
+                        spans,
+                        default_color,
+                        code_bg,
+                        mention_bg,
+                        link_color,
+                        size,
+                        font_family,
+                        wrap,
+                        ellipsis,
+                        align,
+                        tracking,
+                        line_height,
+                        transform,
+                        ..
+                    } => {
+                        if cull_enabled && rect.w > 0.0 && rect.h > 0.0 {
+                            let visible = active_visible_clip(&pre_clip_stack, viewport_logical);
+                            let bounds = conservative_transformed_bounds(*rect, *transform, 4.0);
+                            if !rects_overlap(bounds, visible) {
+                                shaped_texts.push(PendingText::Culled);
+                                continue;
+                            }
+                        }
+                        let shaped = atlas.shape_rich_formatted_to_quads(
+                            spans,
+                            *rect,
+                            scale,
+                            *default_color,
+                            *code_bg,
+                            *mention_bg,
+                            *link_color,
+                            *size,
+                            font_family.as_deref(),
+                            *wrap,
+                            *ellipsis,
+                            *align,
+                            *tracking,
+                            *line_height,
+                        );
+                        shaped_texts.push(PendingText::Rich(shaped));
+                    }
+                    _ => {}
+                }
+            }
+            if pass == 0 && atlas.end_batch() {
+                // Atlas reached capacity mid-frame; clear stale glyphs and repack only this frame's active glyphs.
+                atlas.reset_atlas();
+                continue;
+            }
+            break;
         }
 
         let mut text_cursor = 0usize;

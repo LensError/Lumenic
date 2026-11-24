@@ -34,7 +34,7 @@
 //! ## Architecture & Core Types
 //! - **Entrypoint & Windowing:** [`run`], [`WindowConfig`], [`LoopMode`], [`Decorations`], [`App`] (window controls, `request_attention` / `clear_attention`, popovers, texture upload/destroy, `pick_file` / `save_file` / `pick_folder`), [`PopoverId`], [`CsdAction`], [`Waker`].
 //! - **Offscreen / Embedded GPU Host (Native):** [`OffscreenHost`], [`OffscreenSurface`], [`OffscreenSurfaceConfig`], [`OffscreenSurfaceId`] (multi-surface OpenGL 3.3 Core FBO host without a `winit` event loop, zero-allocation RGBA readback, deterministic `Drop` teardown).
-//! - **Layout & Styling:** [`UiContext`] (flex containers, split panes, virtualized lists, `table` / `data_grid`, `tabs` / `segmented_control`, `collapsing_header` / `tree_view`, `radio` / `radio_group`, `toggle` / `checkbox`, `slider` / `range_slider`, `number_input`, `color_picker`, `input` / `password_input` / `textarea`, `dropdown` / `combobox`, `context_menu`, `modal`, `progress_bar`, `spinner`, `badge`, `toasts`, `sparkline`, `viewport`), [`StyleBuilder`], [`ButtonResponse`], [`RichResponse`], [`TableColumn`], [`TableState`], [`ToastQueue`], [`ToastItem`], [`ToastLevel`], [`Theme`], [`Color`], [`Rect`], [`RectShape`], [`Span`].
+//! - **Layout & Styling:** [`UiContext`] (flex containers, split panes, virtualized lists, `table` / `data_grid`, `tabs` / `segmented_control`, `collapsing_header` / `tree_view`, `radio` / `radio_group`, `toggle` / `checkbox`, `slider` / `range_slider`, `number_input`, `color_picker`, `input` / `password_input` / `textarea`, `dropdown` / `dropdown_styled` / `dropdown_with` / `combobox` / `combobox_styled` / `combobox_with`, `context_menu`, `modal`, `progress_bar`, `spinner`, `badge`, `toasts`, `sparkline`, `viewport`), [`StyleBuilder`], [`ButtonResponse`], [`RichResponse`], [`DropdownStyle`], [`TableColumn`], [`TableState`], [`ToastQueue`], [`ToastItem`], [`ToastLevel`], [`Theme`], [`Color`], [`Rect`], [`RectShape`], [`Span`].
 //! - **Text Editing:** [`TextEditState`] (UTF-8 gap buffer with grapheme cursor, selection, clipboard, IME preedit, and [`History`] undo/redo).
 //! - **2D & 3D Viewports:** [`Canvas2D`], [`Scene3D`], [`Camera3D`], [`MeshData`], [`Vertex3D`], [`Material`], [`Transform3D`], [`MeshId`], [`NodeId`], [`TextureId`], [`TextureFilter`].
 //! - **Sandboxed Storage & Networking:** [`SafeDir`], [`StorageMode`], [`DebouncedSaver`], [`DialogHandle`], [`HttpClient`], [`HttpRequest`], [`HttpResponse`], [`HttpHandle`], [`HttpLimits`], [`HttpMethod`], [`WsClient`], [`WsMessage`], [`WsLimits`].
@@ -98,9 +98,10 @@ pub use sys::panic_flush::{register_panic_flush, run_panic_flush_callbacks};
 pub use sys::sandbox::{DebouncedSaver, SafeDir, StorageMode};
 pub use ui::{
     vlist_range_binary_search, Align, ButtonResponse, Camera3D, Color, CsdAction, CsdStyle,
-    CursorIcon, Decorations, DrawCmd, DrawList, Error, GestureResponse, Gradient, ImageFit,
-    Justify, Key, LoopMode, MeshId, Modifiers, NodeId, OwnedSpan, PerfStats, PointerButton,
-    PopoverId, Rect, RectShape, RichResponse, Role, SemanticNode, Span, SpanKind, StyleBuilder,
-    TableColumn, TableState, TextAlign, TextEditState, TextureId, Theme, ToastCloseStyle,
-    ToastCorner, ToastItem, ToastLevel, ToastQueue, ToastStyle, UiContext, WindowConfig,
+    CursorIcon, Decorations, DrawCmd, DrawList, DropdownStyle, Error, GestureResponse, Gradient,
+    ImageFit, Justify, Key, LoopMode, MeshId, Modifiers, NodeId, OwnedSpan, PerfStats,
+    PointerButton, PopoverId, Rect, RectShape, RichResponse, Role, SemanticNode, Span, SpanKind,
+    StyleBuilder, TableColumn, TableState, TextAlign, TextEditState, TextureId, Theme,
+    ToastCloseStyle, ToastCorner, ToastItem, ToastLevel, ToastQueue, ToastStyle, UiContext,
+    WindowConfig,
 };

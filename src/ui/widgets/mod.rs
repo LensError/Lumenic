@@ -5,6 +5,7 @@ mod feedback;
 mod inputs;
 mod markdown;
 
+pub use controls::DropdownStyle;
 pub use data::{TableColumn, TableState};
 pub use feedback::{ToastCloseStyle, ToastCorner, ToastItem, ToastLevel, ToastQueue, ToastStyle};
 
@@ -13,10 +14,12 @@ use core::ops::RangeInclusive;
 use crate::gfx::image::GifFrame;
 use crate::gfx::viewport::{Canvas2D, Canvas2DCmd, Scene3D, SceneSnapshot};
 use crate::os::App;
-use crate::ui::context::{AxisKind, LayoutNode, Style, StyleBuilder, UiContext};
+use crate::ui::context::{AxisKind, ButtonResponse, LayoutNode, Style, StyleBuilder, UiContext};
 use crate::ui::draw::{OwnedSpan, Role, SpanKind};
 use crate::ui::text_edit::TextEditState;
-use crate::ui::types::{Align, Camera3D, Color, Key, Modifiers, Rect, TextureId, Theme};
+use crate::ui::types::{
+    Align, Camera3D, Color, Key, Modifiers, Rect, RectShape, TextAlign, TextureId, Theme,
+};
 
 pub(crate) fn checkbox_mark_cmds(w: f32, h: f32, color: Color) -> Vec<Canvas2DCmd> {
     let mut c = Canvas2D::new([0.0, 0.0]);
@@ -1697,5 +1700,127 @@ mod tests {
         ui.on_pointer_up(PointerButton::Left);
         draw(&mut ui, &mut state);
         assert_eq!(state.selected_row, Some(1));
+    }
+
+    #[test]
+    fn dropdown_styled_and_combobox_styled_apply_popup_style_and_select() {
+        let mut ui = UiContext::new();
+        let options = ["Alpha", "Beta", "Gamma"];
+        let mut sel = 0usize;
+        let accent = Color::rgb(255, 110, 40);
+        let popup_bg = Color::rgba(28, 30, 36, 240);
+        let item_bg = Color::rgba(38, 40, 48, 255);
+        let hover_bg = Color::rgba(60, 64, 78, 255);
+
+        let dd_style = super::DropdownStyle::new()
+            .bg(popup_bg)
+            .bd(1.5, accent)
+            .bevel_rounded(6.0, 1.3)
+            .p(8.0)
+            .gap(5.0)
+            .max_h(160.0)
+            .shadow(16.0, Color::rgba(0, 0, 0, 150))
+            .sz(13.0)
+            .item_bg(item_bg)
+            .item_hover_bg(hover_bg)
+            .selected_bg(accent)
+            .selected_fg(Color::WHITE)
+            .selected_indicator(Color::rgb(255, 220, 120))
+            .item_bevel_rounded(4.0, 1.0);
+
+        let draw = |ui: &mut UiContext, sel: &mut usize| -> bool {
+            ui.begin_frame(640.0, 480.0, 1.0);
+            let chg = ui
+                .dropdown_styled("styled_dd", sel, &options, &dd_style)
+                .w(180.0)
+                .changed();
+            ui.end_frame();
+            chg
+        };
+
+        assert!(!draw(&mut ui, &mut sel));
+
+        // Click trigger button to open popup.
+        let trig_bounds = ui
+            .semantics()
+            .iter()
+            .find(|n| n.label == "Alpha")
+            .expect("dropdown trigger")
+            .bounds;
+        ui.on_pointer_move(trig_bounds.x + 10.0, trig_bounds.y + 10.0);
+        ui.on_pointer_down(PointerButton::Left);
+        ui.on_pointer_up(PointerButton::Left);
+        assert!(!draw(&mut ui, &mut sel));
+
+        // Verify popup container adopted custom bevel_rounded, bg, border, and shadow.
+        let has_styled_popup = ui.draw_list().overlay_cmds.iter().any(|c| match c {
+            DrawCmd::Rect {
+                bg,
+                border_width,
+                border_color,
+                shape,
+                radius,
+                corner_radii,
+                shadow_blur,
+                ..
+            } => {
+                *bg == popup_bg
+                    && (*border_width - 1.5).abs() < 0.01
+                    && *border_color == accent
+                    && *shape == crate::ui::types::RectShape::Bevel
+                    && (*radius - 1.3).abs() < 0.01
+                    && (corner_radii[0] - 6.0).abs() < 0.01
+                    && (*shadow_blur - 16.0).abs() < 0.01
+            }
+            _ => false,
+        });
+        assert!(
+            has_styled_popup,
+            "dropdown popup should render with custom DropdownStyle bevel_rounded, bg, border, and shadow"
+        );
+
+        // Click "Gamma" inside the opened popup.
+        let gamma_bounds = ui
+            .semantics()
+            .iter()
+            .find(|n| n.label == "Gamma")
+            .expect("Gamma option in popup")
+            .bounds;
+        ui.on_pointer_move(gamma_bounds.x + 10.0, gamma_bounds.y + 10.0);
+        ui.on_pointer_down(PointerButton::Left);
+        ui.on_pointer_up(PointerButton::Left);
+        assert!(draw(&mut ui, &mut sel));
+        assert_eq!(sel, 2);
+
+        // Verify combobox_styled opens and renders custom popup styling too.
+        let mut csel = 1usize;
+        let mut query = crate::ui::text_edit::TextEditState::default();
+        let draw_combo =
+            |ui: &mut UiContext, csel: &mut usize, q: &mut crate::ui::text_edit::TextEditState| {
+                ui.begin_frame(640.0, 480.0, 1.0);
+                let _ = ui.combobox_styled("styled_cb", csel, q, &options, &dd_style);
+                ui.end_frame();
+            };
+        draw_combo(&mut ui, &mut csel, &mut query);
+        let toggle_bounds = ui
+            .semantics()
+            .iter()
+            .find(|n| n.label == "__combo_toggle__")
+            .expect("combobox toggle")
+            .bounds;
+        ui.on_pointer_move(toggle_bounds.x + 6.0, toggle_bounds.y + 6.0);
+        ui.on_pointer_down(PointerButton::Left);
+        ui.on_pointer_up(PointerButton::Left);
+        draw_combo(&mut ui, &mut csel, &mut query);
+        let combo_has_popup = ui.draw_list().overlay_cmds.iter().any(|c| match c {
+            DrawCmd::Rect { bg, shape, .. } => {
+                *bg == popup_bg && *shape == crate::ui::types::RectShape::Bevel
+            }
+            _ => false,
+        });
+        assert!(
+            combo_has_popup,
+            "combobox popup should render with custom DropdownStyle"
+        );
     }
 }
