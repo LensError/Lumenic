@@ -2342,6 +2342,139 @@ impl GlBackend {
         });
     }
 
+    /// Creates a storage-less GL texture name and FBO for external GPU interop registration
+    /// (such as `WGL_NV_DX_interop2`, which supplies the texture storage via `wglDXRegisterObjectNV`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn create_empty_texture_and_fbo(
+        &self,
+    ) -> Result<(glow::Texture, glow::Framebuffer), Error> {
+        // SAFETY: `self.ctx` is current on this thread.
+        let tex = unsafe { self.ctx.create_texture() }
+            .map_err(|e| Error::Graphics(format!("interop glGenTextures failed: {e}")))?;
+        // SAFETY: `self.ctx` is current on this thread.
+        let fbo = match unsafe { self.ctx.create_framebuffer() } {
+            Ok(f) => f,
+            Err(e) => {
+                // SAFETY: `tex` was created by `self.ctx` above and is not bound.
+                unsafe {
+                    self.ctx.delete_texture(tex);
+                }
+                return Err(Error::Graphics(format!(
+                    "interop glGenFramebuffers failed: {e}"
+                )));
+            }
+        };
+        Ok((tex, fbo))
+    }
+
+    /// Attaches a registered (and currently locked) interop texture to `fbo` and validates completeness.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn attach_texture_to_fbo_and_check(
+        &self,
+        fbo: glow::Framebuffer,
+        tex: glow::Texture,
+    ) -> Result<(), Error> {
+        // SAFETY: `self.ctx` is current, `fbo` and `tex` belong to `self.ctx`, and `tex` is locked for GL access.
+        let status = unsafe {
+            self.ctx.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+            self.ctx.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(tex),
+                0,
+            );
+            let s = self.ctx.check_framebuffer_status(glow::FRAMEBUFFER);
+            self.ctx.bind_framebuffer(glow::FRAMEBUFFER, None);
+            s
+        };
+        if status != glow::FRAMEBUFFER_COMPLETE {
+            return Err(Error::Graphics(format!(
+                "interop FBO incomplete (status 0x{status:x})"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Deletes an interop FBO (call before `wglDXUnregisterObjectNV`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn destroy_interop_fbo(&self, fbo: glow::Framebuffer) {
+        // SAFETY: `self.ctx` is current and `fbo` belongs to `self.ctx`.
+        unsafe {
+            self.ctx.bind_framebuffer(glow::FRAMEBUFFER, None);
+            self.ctx.delete_framebuffer(fbo);
+        }
+    }
+
+    /// Deletes an interop GL texture name (call after `wglDXUnregisterObjectNV`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn destroy_interop_texture(&self, tex: glow::Texture) {
+        // SAFETY: `self.ctx` is current and `tex` belongs to `self.ctx`.
+        unsafe {
+            self.ctx.bind_texture(glow::TEXTURE_2D, None);
+            self.ctx.delete_texture(tex);
+        }
+    }
+
+    /// Blits an offscreen surface FBO into a destination FBO with optional vertical flip.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn blit_offscreen_target_to_fbo(
+        &self,
+        src: &OffscreenTarget,
+        dst_fbo: Option<glow::Framebuffer>,
+        dst_w: u32,
+        dst_h: u32,
+        flip_y: bool,
+    ) -> Result<(), Error> {
+        if src.w == 0 || src.h == 0 || dst_w == 0 || dst_h == 0 {
+            return Err(Error::InvalidInput(String::from(
+                "blit dimensions must be non-zero",
+            )));
+        }
+        let src_wi = i32::try_from(src.w)
+            .map_err(|_| Error::InvalidInput(String::from("source width exceeds i32")))?;
+        let src_hi = i32::try_from(src.h)
+            .map_err(|_| Error::InvalidInput(String::from("source height exceeds i32")))?;
+        let dst_wi = i32::try_from(dst_w)
+            .map_err(|_| Error::InvalidInput(String::from("destination width exceeds i32")))?;
+        let dst_hi = i32::try_from(dst_h)
+            .map_err(|_| Error::InvalidInput(String::from("destination height exceeds i32")))?;
+        let (dst_y0, dst_y1) = if flip_y { (dst_hi, 0) } else { (0, dst_hi) };
+        let filter = if src.w == dst_w && src.h == dst_h {
+            glow::NEAREST
+        } else {
+            glow::LINEAR
+        };
+
+        // SAFETY: `self.ctx` is current, `src.fbo` is complete, and `dst_fbo` is valid/locked for draw.
+        unsafe {
+            self.ctx.disable(glow::SCISSOR_TEST);
+            self.ctx.color_mask(true, true, true, true);
+            self.ctx
+                .bind_framebuffer(glow::READ_FRAMEBUFFER, Some(src.fbo));
+            self.ctx.bind_framebuffer(glow::DRAW_FRAMEBUFFER, dst_fbo);
+            self.ctx.read_buffer(glow::COLOR_ATTACHMENT0);
+            if dst_fbo.is_some() {
+                self.ctx.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+            }
+            self.ctx.blit_framebuffer(
+                0,
+                0,
+                src_wi,
+                src_hi,
+                0,
+                dst_y0,
+                dst_wi,
+                dst_y1,
+                glow::COLOR_BUFFER_BIT,
+                filter,
+            );
+            self.ctx.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+            self.ctx.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
+        }
+        Ok(())
+    }
+
     /// Reads an offscreen FBO directly into caller-owned `dst` with zero heap allocations.
     ///
     /// When `bottom_up` is `true`, pixels stay in native OpenGL bottom-up row order (row 0 = bottom).

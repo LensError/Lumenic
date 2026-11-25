@@ -1,6 +1,6 @@
 [package]
 name = "lumenic"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 description = "Lean cross-platform native and WebAssembly application framework"
 license = "MIT OR Apache-2.0"
