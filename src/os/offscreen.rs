@@ -66,11 +66,15 @@ struct D3d11InteropBinding {
     fbo: glow::Framebuffer,
     width: u32,
     height: u32,
+    is_locked: bool,
 }
 
 struct D3d11DeviceEntry {
     h_device: isize,
     ref_count: usize,
+    // Set when a binding remained locked after `glFinish()` + unlock retry; never close a wedged
+    // device handle because `wglDXCloseDeviceNV` with a locked object deadlocks the WGL ICD.
+    wedged: bool,
 }
 
 /// Independent offscreen UI surface holding its own `UiContext`, `App`, and GPU color FBO.
@@ -635,13 +639,25 @@ impl OffscreenHost {
         }
 
         let attach_res = self.gl.attach_texture_to_fbo_and_check(fbo, tex);
-        let unlock_res = self.gl_ctx.dx_unlock_object(h_device, h_object);
+        self.gl.flush();
+        let unlock_res = match self.gl_ctx.dx_unlock_object(h_device, h_object) {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                self.gl.finish();
+                self.gl_ctx.dx_unlock_object(h_device, h_object)
+            }
+        };
+        let unlocked = unlock_res.is_ok();
         if let Err(e) = attach_res.and(unlock_res) {
             self.gl.destroy_interop_fbo(fbo);
-            self.gl_ctx.dx_unregister_object(h_device, h_object);
-            self.gl.destroy_interop_texture(tex);
-            if opened_new {
-                self.gl_ctx.dx_close_device(h_device);
+            if unlocked {
+                self.gl_ctx.dx_unregister_object(h_device, h_object);
+                self.gl.destroy_interop_texture(tex);
+                if opened_new {
+                    self.gl_ctx.dx_close_device(h_device);
+                }
+            } else if let Some(entry) = self.d3d11_devices.get_mut(&device_ptr) {
+                entry.wedged = true;
             }
             return Err(e);
         }
@@ -652,6 +668,7 @@ impl OffscreenHost {
             .or_insert(D3d11DeviceEntry {
                 h_device,
                 ref_count: 0,
+                wedged: false,
             });
         entry.ref_count = entry.ref_count.saturating_add(1);
 
@@ -664,6 +681,7 @@ impl OffscreenHost {
             fbo,
             width: surf_w,
             height: surf_h,
+            is_locked: false,
         });
         Ok(())
     }
@@ -693,6 +711,12 @@ impl OffscreenHost {
     /// Zero-copy GPU-blits the rendered FBO of `id` into its attached D3D11 texture via
     /// `wglDXLockObjectsNV` -> `glBlitFramebuffer` -> `wglDXUnlockObjectsNV`.
     ///
+    /// Attaches and detaches the interop texture around each blit and flushes before unlocking so
+    /// no FBO holds a dangling reference while unlocked. If `wglDXUnlockObjectsNV` fails, drains
+    /// the GL queue (`glFinish`) and retries once; if the handle still cannot be unlocked, tracks
+    /// the locked state so subsequent calls and [`Self::detach_d3d11_texture`] never double-lock
+    /// or deadlock the WGL driver.
+    ///
     /// Set `flip_y = true` to flip from OpenGL bottom-up coordinates into D3D11 top-down texture
     /// memory (row 0 = top), or `flip_y = false` for unflipped copy (e.g. Unity UV conventions).
     pub fn blit_to_d3d11_texture(
@@ -700,43 +724,96 @@ impl OffscreenHost {
         id: OffscreenSurfaceId,
         flip_y: bool,
     ) -> Result<(), Error> {
-        let Some(surf) = self.surfaces.get(&id) else {
+        let Some(surf) = self.surfaces.get_mut(&id) else {
             return Err(Error::InvalidInput(String::from(
                 "unknown offscreen surface id",
             )));
         };
-        let Some(binding) = surf.d3d11_interop.as_ref() else {
+        let Some(binding) = surf.d3d11_interop.as_mut() else {
             return Err(Error::InvalidInput(String::from(
                 "offscreen surface has no attached D3D11 interop texture",
             )));
         };
 
         self.gl_ctx.make_current()?;
-        self.gl_ctx.dx_lock_object(binding.h_device, binding.h_object)?;
-        let blit_res = self.gl.blit_offscreen_target_to_fbo(
+
+        // If a previous unlock failed, recover via `glFinish` + unlock before attempting to lock again.
+        if binding.is_locked {
+            self.gl.finish();
+            self.gl_ctx
+                .dx_unlock_object(binding.h_device, binding.h_object)?;
+            binding.is_locked = false;
+        }
+
+        self.gl_ctx
+            .dx_lock_object(binding.h_device, binding.h_object)?;
+        binding.is_locked = true;
+
+        let blit_res = self.gl.blit_offscreen_target_to_interop_texture(
             &surf.target,
-            Some(binding.fbo),
+            binding.fbo,
+            binding.tex,
             binding.width,
             binding.height,
             flip_y,
         );
-        let unlock_res = self
+
+        let unlock_res = match self
             .gl_ctx
-            .dx_unlock_object(binding.h_device, binding.h_object);
+            .dx_unlock_object(binding.h_device, binding.h_object)
+        {
+            Ok(()) => {
+                binding.is_locked = false;
+                Ok(())
+            }
+            Err(_) => {
+                // Retry once after draining the GL pipeline in case the blit was still in flight.
+                self.gl.finish();
+                match self
+                    .gl_ctx
+                    .dx_unlock_object(binding.h_device, binding.h_object)
+                {
+                    Ok(()) => {
+                        binding.is_locked = false;
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+        };
         blit_res.and(unlock_res)
     }
 
-    fn release_d3d11_binding(&mut self, binding: D3d11InteropBinding) {
+    fn release_d3d11_binding(&mut self, mut binding: D3d11InteropBinding) {
         let current_ok = self.gl_ctx.make_current().is_ok();
+        let mut wedged = false;
         if current_ok {
+            self.gl.finish();
             self.gl.destroy_interop_fbo(binding.fbo);
-            self.gl_ctx
-                .dx_unregister_object(binding.h_device, binding.h_object);
-            self.gl.destroy_interop_texture(binding.tex);
+            if binding.is_locked
+                && self
+                    .gl_ctx
+                    .dx_unlock_object(binding.h_device, binding.h_object)
+                    .is_ok()
+            {
+                binding.is_locked = false;
+            }
+            if !binding.is_locked {
+                self.gl_ctx
+                    .dx_unregister_object(binding.h_device, binding.h_object);
+                self.gl.destroy_interop_texture(binding.tex);
+            } else {
+                // Never call `wglDXUnregisterObjectNV` or `wglDXCloseDeviceNV` on a still-locked
+                // handle: WGL ICD drivers deadlock waiting on the locked DX/GL sync object.
+                wedged = true;
+            }
         }
         let close_handle = if let Some(entry) = self.d3d11_devices.get_mut(&binding.device_ptr) {
+            if wedged {
+                entry.wedged = true;
+            }
             entry.ref_count = entry.ref_count.saturating_sub(1);
-            if entry.ref_count == 0 {
+            if entry.ref_count == 0 && !entry.wedged {
                 let h = entry.h_device;
                 self.d3d11_devices.remove(&binding.device_ptr);
                 Some(h)
@@ -757,17 +834,38 @@ impl OffscreenHost {
 impl Drop for OffscreenHost {
     fn drop(&mut self) {
         if self.gl_ctx.make_current().is_ok() {
+            let had_interop = self
+                .surfaces
+                .values()
+                .any(|s| s.d3d11_interop.is_some());
+            if had_interop {
+                self.gl.finish();
+            }
             for (_, mut surf) in self.surfaces.drain() {
-                if let Some(binding) = surf.d3d11_interop.take() {
+                if let Some(mut binding) = surf.d3d11_interop.take() {
                     self.gl.destroy_interop_fbo(binding.fbo);
-                    self.gl_ctx
-                        .dx_unregister_object(binding.h_device, binding.h_object);
-                    self.gl.destroy_interop_texture(binding.tex);
+                    if binding.is_locked
+                        && self
+                            .gl_ctx
+                            .dx_unlock_object(binding.h_device, binding.h_object)
+                            .is_ok()
+                    {
+                        binding.is_locked = false;
+                    }
+                    if !binding.is_locked {
+                        self.gl_ctx
+                            .dx_unregister_object(binding.h_device, binding.h_object);
+                        self.gl.destroy_interop_texture(binding.tex);
+                    } else if let Some(entry) = self.d3d11_devices.get_mut(&binding.device_ptr) {
+                        entry.wedged = true;
+                    }
                 }
                 self.gl.destroy_offscreen_target(surf.target);
             }
             for (_, dev) in self.d3d11_devices.drain() {
-                self.gl_ctx.dx_close_device(dev.h_device);
+                if !dev.wedged {
+                    self.gl_ctx.dx_close_device(dev.h_device);
+                }
             }
             self.gl.destroy_gl_resources();
         } else {
@@ -872,6 +970,8 @@ mod platform {
         fn LoadLibraryW(lp_lib_file_name: *const u16) -> isize;
         fn FreeLibrary(h_lib_module: isize) -> i32;
         fn GetProcAddress(h_module: isize, lp_proc_name: *const c_char) -> *const c_void;
+        fn GetLastError() -> u32;
+        fn SetLastError(dw_err_code: u32);
     }
 
     #[link(name = "user32")]
@@ -926,6 +1026,20 @@ mod platform {
     type WglDxUnlockObjectsNvFn = unsafe extern "system" fn(isize, i32, *mut isize) -> i32;
 
     const WGL_ACCESS_READ_WRITE_NV: u32 = 0x0001;
+    const ERROR_LOCK_FAILED: u32 = 0x0000_00A7;
+    const WGL_ERROR_LOCK_FAILED: u32 = 0xC007_00A7;
+
+    fn is_transient_dx_lock_error(code: u32) -> bool {
+        code == ERROR_LOCK_FAILED || code == WGL_ERROR_LOCK_FAILED
+    }
+
+    fn format_wgl_dx_error(op: &str, code: u32) -> String {
+        if is_transient_dx_lock_error(code) {
+            format!("{op} failed: ERROR_LOCK_FAILED (0x{code:08x})")
+        } else {
+            format!("{op} failed: Win32 error 0x{code:08x}")
+        }
+    }
 
     struct WglDxInteropFns {
         open_device: WglDxOpenDeviceNvFn,
@@ -1270,11 +1384,16 @@ mod platform {
                 Error::Graphics(String::from("WGL_NV_DX_interop2 is not supported"))
             })?;
             // SAFETY: WGL context is current and caller guarantees `d3d11_device` is a valid `ID3D11Device*`.
-            let h_device = unsafe { (fns.open_device)(d3d11_device) };
+            let h_device = unsafe {
+                SetLastError(0);
+                (fns.open_device)(d3d11_device)
+            };
             if h_device == 0 {
-                return Err(Error::Graphics(format!(
-                    "wglDXOpenDeviceNV failed: {}",
-                    std::io::Error::last_os_error()
+                // SAFETY: reading thread-local Win32 error code immediately after failed call.
+                let code = unsafe { GetLastError() };
+                return Err(Error::Graphics(format_wgl_dx_error(
+                    "wglDXOpenDeviceNV",
+                    code,
                 )));
             }
             Ok(h_device)
@@ -1304,6 +1423,7 @@ mod platform {
             // SAFETY: `h_device` is open, `d3d11_texture` is a valid `ID3D11Texture2D*` on that device,
             // and `gl_tex_id` is a freshly generated storage-less GL texture name.
             let h_object = unsafe {
+                SetLastError(0);
                 (fns.register_object)(
                     h_device,
                     d3d11_texture,
@@ -1313,9 +1433,11 @@ mod platform {
                 )
             };
             if h_object == 0 {
-                return Err(Error::Graphics(format!(
-                    "wglDXRegisterObjectNV failed: {}",
-                    std::io::Error::last_os_error()
+                // SAFETY: reading thread-local Win32 error code immediately after failed call.
+                let code = unsafe { GetLastError() };
+                return Err(Error::Graphics(format_wgl_dx_error(
+                    "wglDXRegisterObjectNV",
+                    code,
                 )));
             }
             Ok(h_object)
@@ -1334,30 +1456,59 @@ mod platform {
         }
 
         pub(super) fn dx_lock_object(&self, h_device: isize, h_object: isize) -> Result<(), Error> {
+            if h_device == 0 || h_object == 0 {
+                return Err(Error::InvalidInput(String::from(
+                    "wglDXLockObjectsNV requires non-zero device and object handles",
+                )));
+            }
             let fns = self.dx_interop.as_ref().ok_or_else(|| {
                 Error::Graphics(String::from("WGL_NV_DX_interop2 is not supported"))
             })?;
-            let mut obj = h_object;
-            // SAFETY: `h_device` and `h_object` are valid handles and `&mut obj` points to 1 `HANDLE`.
-            if unsafe { (fns.lock_objects)(h_device, 1, &mut obj) } == 0 {
-                return Err(Error::Graphics(format!(
-                    "wglDXLockObjectsNV failed: {}",
-                    std::io::Error::last_os_error()
-                )));
+            let mut last_code = 0u32;
+            for attempt in 0..3 {
+                let mut obj = h_object;
+                // SAFETY: `h_device` and `h_object` are valid handles and `&mut obj` points to 1 `HANDLE`.
+                let ok = unsafe {
+                    SetLastError(0);
+                    (fns.lock_objects)(h_device, 1, &mut obj)
+                };
+                if ok != 0 {
+                    return Ok(());
+                }
+                // SAFETY: reading thread-local Win32 error code immediately after failed call.
+                last_code = unsafe { GetLastError() };
+                if !is_transient_dx_lock_error(last_code) || attempt == 2 {
+                    break;
+                }
+                std::thread::yield_now();
             }
-            Ok(())
+            Err(Error::Graphics(format_wgl_dx_error(
+                "wglDXLockObjectsNV",
+                last_code,
+            )))
         }
 
         pub(super) fn dx_unlock_object(&self, h_device: isize, h_object: isize) -> Result<(), Error> {
+            if h_device == 0 || h_object == 0 {
+                return Err(Error::InvalidInput(String::from(
+                    "wglDXUnlockObjectsNV requires non-zero device and object handles",
+                )));
+            }
             let fns = self.dx_interop.as_ref().ok_or_else(|| {
                 Error::Graphics(String::from("WGL_NV_DX_interop2 is not supported"))
             })?;
             let mut obj = h_object;
             // SAFETY: `h_device` and `h_object` are valid locked handles and `&mut obj` points to 1 `HANDLE`.
-            if unsafe { (fns.unlock_objects)(h_device, 1, &mut obj) } == 0 {
-                return Err(Error::Graphics(format!(
-                    "wglDXUnlockObjectsNV failed: {}",
-                    std::io::Error::last_os_error()
+            let ok = unsafe {
+                SetLastError(0);
+                (fns.unlock_objects)(h_device, 1, &mut obj)
+            };
+            if ok == 0 {
+                // SAFETY: reading thread-local Win32 error code immediately after failed call.
+                let code = unsafe { GetLastError() };
+                return Err(Error::Graphics(format_wgl_dx_error(
+                    "wglDXUnlockObjectsNV",
+                    code,
                 )));
             }
             Ok(())
@@ -2194,6 +2345,18 @@ mod tests {
         );
         assert_eq!(read_d3d11_pixel(tex1, 8, 8), [0, 0, 0, 0]);
 
+        // Repeated multi-frame blit + D3D11 readback cycles verify per-blit FBO attach/detach and lock tracking.
+        for i in 0..8u8 {
+            let r = 80 + i * 20;
+            host.step_frame_forced(s1, 0.016, |ui, _app| {
+                ui.col(|_| {}).w(32.0).h(32.0).bg(Color::rgb(r, 60, 120));
+            })
+            .expect("render cycle");
+            host.blit_to_d3d11_texture(s1, true)
+                .expect("blit cycle");
+            assert_eq!(read_d3d11_pixel(tex1, 8, 8), [r, 60, 120, 255]);
+        }
+
         // Resize auto-detaches s1 while s2 stays attached and keeps the shared device open.
         host.resize_surface(s1, 32, 32, 1.0).expect("resize s1");
         assert!(!host.has_d3d11_texture(s1));
@@ -2211,5 +2374,67 @@ mod tests {
             com_release(device);
             let _ = FreeLibrary(d3d11_mod);
         }
+    }
+
+    #[test]
+    fn offscreen_wedged_locked_d3d11_binding_detaches_without_deadlock_and_falls_back() {
+        let mut host = match OffscreenHost::new() {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("skipping wedged D3D11 detach test (no GL driver): {e}");
+                return;
+            }
+        };
+        let s1 = host
+            .create_surface(OffscreenSurfaceConfig::new(32, 32))
+            .expect("create s1");
+        host.step_frame_forced(s1, 0.016, |ui, _app| {
+            ui.col(|_| {}).w(32.0).h(32.0).bg(Color::rgb(40, 180, 90));
+        })
+        .expect("render s1");
+
+        // Inject a synthetic locked binding whose unlock fails (h_device = 0, h_object = 0) to
+        // verify detach never calls unregister/close on a locked handle and allows immediate CPU fallback.
+        host.make_current().expect("make_current");
+        let (tex, fbo) = host
+            .gl
+            .create_empty_texture_and_fbo()
+            .expect("create dummy interop tex/fbo");
+        let fake_dev_ptr = 0xDEAD_BEEFusize;
+        host.d3d11_devices.insert(
+            fake_dev_ptr,
+            D3d11DeviceEntry {
+                h_device: 0,
+                ref_count: 1,
+                wedged: false,
+            },
+        );
+        host.surfaces.get_mut(&s1).unwrap().d3d11_interop = Some(D3d11InteropBinding {
+            device_ptr: fake_dev_ptr,
+            h_device: 0,
+            h_object: 0,
+            tex,
+            fbo,
+            width: 32,
+            height: 32,
+            is_locked: true,
+        });
+
+        // Blit on an already-locked binding whose unlock fails must error without double-locking.
+        assert!(host.blit_to_d3d11_texture(s1, true).is_err());
+
+        // Detach must return immediately, mark the device wedged, and allow CPU readback fallback.
+        assert!(host.detach_d3d11_texture(s1));
+        assert!(!host.has_d3d11_texture(s1));
+        assert!(host.d3d11_devices.get(&fake_dev_ptr).unwrap().wedged);
+
+        let mut rgba = vec![0u8; host.surface(s1).unwrap().rgba_byte_len()];
+        host.read_pixels_rgba_into(s1, &mut rgba, false)
+            .expect("CPU readback fallback after wedged detach");
+        assert_eq!(&rgba[(8 * 32 + 8) * 4..(8 * 32 + 8) * 4 + 4], &[40, 180, 90, 255]);
+
+        // Clean up the synthetic GL texture name (since wedged detach intentionally skipped deleting it).
+        host.gl.destroy_interop_texture(tex);
+        drop(host);
     }
 }

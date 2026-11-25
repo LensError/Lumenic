@@ -2367,7 +2367,8 @@ impl GlBackend {
         Ok((tex, fbo))
     }
 
-    /// Attaches a registered (and currently locked) interop texture to `fbo` and validates completeness.
+    /// Attaches a registered (and currently locked) interop texture to `fbo`, validates FBO
+    /// completeness, and immediately detaches the texture so no FBO holds a reference while unlocked.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn attach_texture_to_fbo_and_check(
         &self,
@@ -2385,6 +2386,13 @@ impl GlBackend {
                 0,
             );
             let s = self.ctx.check_framebuffer_status(glow::FRAMEBUFFER);
+            self.ctx.framebuffer_texture_2d(
+                glow::FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                None,
+                0,
+            );
             self.ctx.bind_framebuffer(glow::FRAMEBUFFER, None);
             s
         };
@@ -2392,6 +2400,83 @@ impl GlBackend {
             return Err(Error::Graphics(format!(
                 "interop FBO incomplete (status 0x{status:x})"
             )));
+        }
+        Ok(())
+    }
+
+    /// Blits an offscreen surface FBO into a locked interop texture via `dst_fbo`, detaching
+    /// `COLOR_ATTACHMENT0` and flushing before returning so `wglDXUnlockObjectsNV` never sees
+    /// a dangling FBO attachment or unflushed blit.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn blit_offscreen_target_to_interop_texture(
+        &self,
+        src: &OffscreenTarget,
+        dst_fbo: glow::Framebuffer,
+        dst_tex: glow::Texture,
+        dst_w: u32,
+        dst_h: u32,
+        flip_y: bool,
+    ) -> Result<(), Error> {
+        if src.w == 0 || src.h == 0 || dst_w == 0 || dst_h == 0 {
+            return Err(Error::InvalidInput(String::from(
+                "blit dimensions must be non-zero",
+            )));
+        }
+        let src_wi = i32::try_from(src.w)
+            .map_err(|_| Error::InvalidInput(String::from("source width exceeds i32")))?;
+        let src_hi = i32::try_from(src.h)
+            .map_err(|_| Error::InvalidInput(String::from("source height exceeds i32")))?;
+        let dst_wi = i32::try_from(dst_w)
+            .map_err(|_| Error::InvalidInput(String::from("destination width exceeds i32")))?;
+        let dst_hi = i32::try_from(dst_h)
+            .map_err(|_| Error::InvalidInput(String::from("destination height exceeds i32")))?;
+        let (dst_y0, dst_y1) = if flip_y { (dst_hi, 0) } else { (0, dst_hi) };
+        let filter = if src.w == dst_w && src.h == dst_h {
+            glow::NEAREST
+        } else {
+            glow::LINEAR
+        };
+
+        // SAFETY: `self.ctx` is current, `src.fbo` is complete, `dst_fbo` belongs to `self.ctx`,
+        // and `dst_tex` is currently locked via `wglDXLockObjectsNV`.
+        unsafe {
+            self.ctx.disable(glow::SCISSOR_TEST);
+            self.ctx.color_mask(true, true, true, true);
+            self.ctx
+                .bind_framebuffer(glow::READ_FRAMEBUFFER, Some(src.fbo));
+            self.ctx
+                .bind_framebuffer(glow::DRAW_FRAMEBUFFER, Some(dst_fbo));
+            self.ctx.framebuffer_texture_2d(
+                glow::DRAW_FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                Some(dst_tex),
+                0,
+            );
+            self.ctx.read_buffer(glow::COLOR_ATTACHMENT0);
+            self.ctx.draw_buffers(&[glow::COLOR_ATTACHMENT0]);
+            self.ctx.blit_framebuffer(
+                0,
+                0,
+                src_wi,
+                src_hi,
+                0,
+                dst_y0,
+                dst_wi,
+                dst_y1,
+                glow::COLOR_BUFFER_BIT,
+                filter,
+            );
+            self.ctx.framebuffer_texture_2d(
+                glow::DRAW_FRAMEBUFFER,
+                glow::COLOR_ATTACHMENT0,
+                glow::TEXTURE_2D,
+                None,
+                0,
+            );
+            self.ctx.bind_framebuffer(glow::READ_FRAMEBUFFER, None);
+            self.ctx.bind_framebuffer(glow::DRAW_FRAMEBUFFER, None);
+            self.ctx.flush();
         }
         Ok(())
     }
