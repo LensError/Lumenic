@@ -731,7 +731,7 @@ impl GlyphAtlas {
         }
     }
 
-    fn measure_buffer(
+    fn measure_buffer_raw(
         buffer: &Buffer,
         font_size: f32,
         tracking: f32,
@@ -761,6 +761,17 @@ impl GlyphAtlas {
         if total_h <= 0.0 {
             total_h = font_size * lh_mult;
         }
+        [max_w, total_h]
+    }
+
+    fn measure_buffer(
+        buffer: &Buffer,
+        font_size: f32,
+        tracking: f32,
+        line_height_mult: f32,
+    ) -> [f32; 2] {
+        let [max_w, total_h] =
+            Self::measure_buffer_raw(buffer, font_size, tracking, line_height_mult);
         let w = if max_w > 0.0 { max_w.ceil() + 3.0 } else { 0.0 };
         [w, total_h.ceil()]
     }
@@ -800,7 +811,10 @@ impl GlyphAtlas {
             b.set_text(text, attrs, Shaping::Advanced);
             b.shape_until_scroll(true);
         }
-        let full_w = Self::measure_buffer(&self.scratch_buf, font_size, tracking, lh_mult)[0];
+        // Compare against the actual glyph advance width (without measure_buffer's +3.0 layout
+        // padding) so tight intrinsic-width boxes and fractional DPI Rect::snap() rounding
+        // never falsely truncate text whose glyphs already fit.
+        let full_w = Self::measure_buffer_raw(&self.scratch_buf, font_size, tracking, lh_mult)[0];
         if full_w <= max_width {
             return String::from(text);
         }
@@ -1867,26 +1881,26 @@ mod tests {
     #[test]
     fn semibold_ellipsis_matches_measure_without_truncating_on_missing_weight() {
         let mut atlas = GlyphAtlas::new_with_system_fonts();
-        for sample in ["Joe", "LensError", "Doughnut Princess"] {
-            for weight in [500u16, 600u16] {
-                let measured = atlas.measure_plain_formatted(
-                    sample, 12.5, weight, false, None, 0.0, 1.35, None, false, true,
-                );
-                assert_eq!(
-                    atlas.truncate_with_ellipsis(
-                        sample,
-                        12.5,
-                        weight,
-                        false,
-                        None,
-                        0.0,
-                        1.35,
-                        measured[0],
-                    ),
-                    sample,
-                    "weight {weight} should not truncate {sample:?} against its own measured width {}",
-                    measured[0]
-                );
+        for sample in ["Joe", "LensError", "Doughnut Princess", "Players", "Toolbox"] {
+            for sz in [11.5_f32, 12.5_f32] {
+                for weight in [400u16, 500u16, 600u16] {
+                    let measured = atlas.measure_plain_formatted(
+                        sample, sz, weight, false, None, 0.0, 1.35, None, false, true,
+                    );
+                    for scale in [1.0_f32, 1.25_f32, 1.5_f32] {
+                        let snapped_w = Rect::new(10.0, 10.0, measured[0], measured[1])
+                            .snap(scale)
+                            .w;
+                        assert_eq!(
+                            atlas.truncate_with_ellipsis(
+                                sample, sz, weight, false, None, 0.0, 1.35, snapped_w,
+                            ),
+                            sample,
+                            "weight {weight} at scale {scale} should not truncate {sample:?} (measured {}, snapped {snapped_w})",
+                            measured[0]
+                        );
+                    }
+                }
             }
         }
     }
