@@ -765,6 +765,7 @@ impl GlyphAtlas {
         [w, total_h.ceil()]
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn truncate_with_ellipsis(
         &mut self,
         text: &str,
@@ -772,11 +773,20 @@ impl GlyphAtlas {
         weight: u16,
         mono: bool,
         font_family: Option<&str>,
+        tracking: f32,
+        line_height: f32,
         max_width: f32,
     ) -> String {
-        let metrics = Metrics::new(font_size.max(1.0), (font_size * 1.35).max(1.0));
+        let lh_mult = if line_height.is_finite() && line_height > 0.0 {
+            line_height
+        } else {
+            1.35
+        };
+        let metrics = Metrics::new(font_size.max(1.0), (font_size * lh_mult).max(1.0));
         let resolved_family = self.effective_family_owned(font_family, mono);
-        let mut attrs = Attrs::new().weight(Weight(weight.clamp(100, 900)));
+        let effective_weight =
+            self.resolve_weight_for_family(resolved_family.as_deref(), mono, weight);
+        let mut attrs = Attrs::new().weight(Weight(effective_weight));
         if let Some(ref fam) = resolved_family {
             attrs = attrs.family(Family::Name(fam.as_str()));
         } else if mono {
@@ -790,7 +800,7 @@ impl GlyphAtlas {
             b.set_text(text, attrs, Shaping::Advanced);
             b.shape_until_scroll(true);
         }
-        let full_w = Self::measure_buffer(&self.scratch_buf, font_size, 0.0, 1.35)[0];
+        let full_w = Self::measure_buffer(&self.scratch_buf, font_size, tracking, lh_mult)[0];
         if full_w <= max_width {
             return String::from(text);
         }
@@ -814,7 +824,9 @@ impl GlyphAtlas {
                 b.set_text(&candidate, attrs, Shaping::Advanced);
                 b.shape_until_scroll(true);
             }
-            if Self::measure_buffer(&self.scratch_buf, font_size, 0.0, 1.35)[0] <= max_width {
+            if Self::measure_buffer(&self.scratch_buf, font_size, tracking, lh_mult)[0]
+                <= max_width
+            {
                 best = cut;
                 lo = mid + 1;
             } else if mid == 0 {
@@ -944,7 +956,16 @@ impl GlyphAtlas {
         }
 
         let display_text = if ellipsis && !wrap && rect.w > 0.0 {
-            self.truncate_with_ellipsis(text, font_size, weight, mono, font_family, rect.w)
+            self.truncate_with_ellipsis(
+                text,
+                font_size,
+                weight,
+                mono,
+                font_family,
+                tracking,
+                lh_mult,
+                rect.w,
+            )
         } else {
             String::from(text)
         };
@@ -1126,8 +1147,16 @@ impl GlyphAtlas {
 
         if ellipsis && !wrap && rect.w > 0.0 {
             let combined: String = spans.iter().map(|s| s.text.as_str()).collect();
-            let truncated =
-                self.truncate_with_ellipsis(&combined, font_size, 400, false, font_family, rect.w);
+            let truncated = self.truncate_with_ellipsis(
+                &combined,
+                font_size,
+                400,
+                false,
+                font_family,
+                tracking,
+                lh_mult,
+                rect.w,
+            );
             if truncated.len() < combined.len() {
                 return self.shape_plain_formatted_to_quads(
                     &truncated,
@@ -1820,18 +1849,46 @@ mod tests {
         let mut atlas = GlyphAtlas::new_fallback_only();
         let full = "Lumenic fast customizable UI framework";
         assert_eq!(
-            atlas.truncate_with_ellipsis(full, 14.0, 400, false, None, 1000.0),
+            atlas.truncate_with_ellipsis(full, 14.0, 400, false, None, 0.0, 1.35, 1000.0),
             full
         );
-        let truncated = atlas.truncate_with_ellipsis(full, 14.0, 400, false, None, 110.0);
+        let truncated =
+            atlas.truncate_with_ellipsis(full, 14.0, 400, false, None, 0.0, 1.35, 110.0);
         assert!(truncated.ends_with("..."));
         assert!(truncated.len() < full.len());
         let w = atlas.measure_plain(&truncated, 14.0, None, false, false)[0];
         assert!(w <= 110.0);
         assert_eq!(
-            atlas.truncate_with_ellipsis(full, 14.0, 400, false, None, 1.0),
+            atlas.truncate_with_ellipsis(full, 14.0, 400, false, None, 0.0, 1.35, 1.0),
             "..."
         );
+    }
+
+    #[test]
+    fn semibold_ellipsis_matches_measure_without_truncating_on_missing_weight() {
+        let mut atlas = GlyphAtlas::new_with_system_fonts();
+        for sample in ["Joe", "LensError", "Doughnut Princess"] {
+            for weight in [500u16, 600u16] {
+                let measured = atlas.measure_plain_formatted(
+                    sample, 12.5, weight, false, None, 0.0, 1.35, None, false, true,
+                );
+                assert_eq!(
+                    atlas.truncate_with_ellipsis(
+                        sample,
+                        12.5,
+                        weight,
+                        false,
+                        None,
+                        0.0,
+                        1.35,
+                        measured[0],
+                    ),
+                    sample,
+                    "weight {weight} should not truncate {sample:?} against its own measured width {}",
+                    measured[0]
+                );
+            }
+        }
     }
 
     #[test]
