@@ -1823,4 +1823,93 @@ mod tests {
             "combobox popup should render with custom DropdownStyle"
         );
     }
+
+    #[test]
+    fn slider_and_range_slider_fill_and_fg_apply_custom_colors() {
+        let mut ui = UiContext::new();
+        let default_primary = ui.theme().primary;
+        let accent_compact = Color::rgb(255, 80, 0);
+        let accent_full = Color::rgb(40, 210, 120);
+        let accent_max = Color::rgb(220, 60, 190);
+        let accent_range = Color::rgb(180, 140, 30);
+        let custom_label = Color::rgb(230, 220, 100);
+        let track_bg = Color::rgba(40, 20, 20, 180);
+
+        let mut v_compact = 50.0f32;
+        let mut v_full = 40.0f32;
+        let mut v_max = 100.0f32;
+        let mut r_low = 20.0f32;
+        let mut r_high = 80.0f32;
+
+        ui.begin_frame(480.0, 360.0, 1.0);
+        ui.col(|ui| {
+            ui.slider("CompactSlider", &mut v_compact, 0.0..=100.0)
+                .compact()
+                .track_h(14.0)
+                .track_bg(track_bg)
+                .fill(accent_compact);
+            ui.slider("FullSlider", &mut v_full, 0.0..=100.0)
+                .fill(accent_full)
+                .fg(custom_label);
+            ui.slider("MaxSlider", &mut v_max, 0.0..=100.0)
+                .fill(accent_max)
+                .compact();
+            ui.range_slider("RangeSlider", &mut r_low, &mut r_high, 0.0..=100.0)
+                .fill(accent_range);
+        })
+        .w(320.0)
+        .gap(8.0);
+        ui.end_frame();
+
+        let rects = &ui.draw_list().base_cmds;
+        for (name, expected) in [
+            ("compact slider", accent_compact),
+            ("full slider", accent_full),
+            ("max slider", accent_max),
+            ("range slider", accent_range),
+        ] {
+            assert!(
+                rects
+                    .iter()
+                    .any(|c| matches!(c, DrawCmd::Rect { bg, .. } if *bg == expected)),
+                "{name} active fill rect should use custom fill color {expected:?}"
+            );
+        }
+
+        // Default theme primary should not appear on any slider fill or range thumb border.
+        assert!(
+            !rects.iter().any(|c| matches!(
+                c,
+                DrawCmd::Rect { bg, border_color, .. }
+                    if *bg == default_primary || *border_color == default_primary
+            )),
+            "default theme primary should be overridden by custom .fill() on all sliders"
+        );
+
+        // Range slider thumbs should inherit the custom fill color on their borders.
+        let themed_thumbs = rects
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    DrawCmd::Rect {
+                        shape: crate::ui::types::RectShape::Circle,
+                        border_color,
+                        ..
+                    } if *border_color == accent_range
+                )
+            })
+            .count();
+        assert_eq!(themed_thumbs, 2, "both range slider thumbs should use custom fill border");
+
+        // Non-compact slider header label should inherit .fg(custom_label).
+        assert!(
+            rects.iter().any(|c| matches!(
+                c,
+                DrawCmd::Text { text, color, .. }
+                    if text == "FullSlider" && *color == custom_label
+            )),
+            "slider header label should use custom .fg() color"
+        );
+    }
 }

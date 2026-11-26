@@ -83,13 +83,24 @@ macro_rules! impl_style_methods {
                 self
             }
 
-            /// Sets the foreground text or sparkline stroke color.
+            /// Sets the foreground text, sparkline stroke, or slider header label color.
             pub fn fg(self, color: Color) -> Self {
                 self.ui.nodes[self.node_idx].style.fg = Some(color);
+                let has_slider = self.ui.nodes[self.node_idx]
+                    .children
+                    .iter()
+                    .any(|&cid| self.ui.nodes[cid].role == Role::Slider);
                 for i in 0..self.ui.nodes[self.node_idx].children.len() {
                     let cid = self.ui.nodes[self.node_idx].children[i];
                     if self.ui.nodes[cid].role == Role::Label {
                         self.ui.nodes[cid].style.fg = Some(color);
+                    } else if has_slider && self.ui.nodes[cid].role != Role::Slider {
+                        for j in 0..self.ui.nodes[cid].children.len() {
+                            let hcid = self.ui.nodes[cid].children[j];
+                            if self.ui.nodes[hcid].role == Role::Label {
+                                self.ui.nodes[hcid].style.fg = Some(color);
+                            }
+                        }
                     }
                 }
                 self
@@ -161,9 +172,22 @@ macro_rules! impl_style_methods {
                 self
             }
 
-            /// Sets the area fill color for sparklines (or similar curve widgets).
+            /// Sets the area fill color for sparklines (or similar curve widgets) and the active fill color for `slider` / `range_slider`.
             pub fn fill(self, color: Color) -> Self {
                 self.ui.nodes[self.node_idx].style.fill_color = Some(color);
+                for i in 0..self.ui.nodes[self.node_idx].children.len() {
+                    let cid = self.ui.nodes[self.node_idx].children[i];
+                    if self.ui.nodes[cid].role == Role::Slider {
+                        for j in 0..self.ui.nodes[cid].children.len() {
+                            let scid = self.ui.nodes[cid].children[j];
+                            if self.ui.nodes[scid].style.shape == RectShape::Circle {
+                                self.ui.nodes[scid].style.border_color = color;
+                            } else if self.ui.nodes[scid].style.bg.is_some() {
+                                self.ui.nodes[scid].style.bg = Some(color);
+                            }
+                        }
+                    }
+                }
                 self
             }
 
